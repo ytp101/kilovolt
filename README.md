@@ -57,20 +57,20 @@ Kilovolt is configured using environment variables or a `.env` file in the worki
 
 ---
 
-## 📦 Quickstart
+## 📦 Quickstart (Under 60 Seconds)
 
-To run the Bankruptcy Shield proxy gateway in production with zero dependencies, pull and execute the pre-compiled Docker image from Docker Hub:
+Deploy the Bankruptcy Shield gateway instantly with zero local dependencies:
 
-### 1. Create a `.env` file
-Configure your environment variables in a local `.env` file:
+### 1. Configure Settings
+Create a `.env` file in your project directory:
 ```env
 KILOVOLT_PORT=8080
 KILOVOLT_DEFAULT_BUDGET=5.00
 RUST_LOG=kilovolt=info
 ```
 
-### 2. Run the Docker Container
-Launch the gateway using your environment settings and expose the configured port:
+### 2. Launch the Gateway
+Expose the proxy and mount your configuration using Docker:
 ```bash
 docker run -d --env-file .env -p 8080:8080 yodsarun/kilovolt-proxy:latest
 ```
