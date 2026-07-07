@@ -14,17 +14,18 @@ It intercepts OpenAI-compatible API traffic on localhost, proxies it upstream to
 When running high-volume LLM pipelines on small virtual servers, standard gateway integrations can cause major memory leaks and unexpected cloud charges:
 1. **OOM Crashes**: Buffering large token streams into memory before sending them downstream quickly consumes VPS heap space, resulting in Out-Of-Memory (OOM) process terminations.
 2. **Ghost Billing**: If a downstream client abruptly disconnects mid-stream, many API integrations continue downloading and billing for upstream tokens.
-3. **Bankruptcy Shield**: Kilovolt tracks user budgets in memory and trips a low-latency circuit breaker pre-flight the moment a user exceeds their limit—preventing runaway costs.
+3. **Bankruptcy Shield**: Kilovolt tracks user budgets in memory and trips a low-latency circuit breaker both pre-flight and mid-stream the exact millisecond a user exceeds their limit—preventing runaway costs and fractional overdrafts.
 
 ---
 
 ## 🚀 Core Features
 
 - **Zero-Copy Stream Piping**: Pipes byte-chunks from OpenAI's SSE (`text/event-stream`) directly to client sockets. The gateway's memory footprint remains flat regardless of the size or duration of the chat stream.
-- **In-Memory Budget Circuit Breaker**: Thread-safe spend tracking with pre-flight validation. Tripping budget thresholds immediately short-circuits requests with a clean, OpenAI-compatible JSON error (`429 Too Many Requests`).
+- **Pre-Flight Prompt Validation**: Inspects incoming payloads, calculates prompt tokens using tiktoken BPE, projects the USD cost based on model-specific rates, and rejects requests with `429 Too Many Requests` if the user is over budget.
+- **Mid-Stream Circuit Breaker**: Actively parses streaming SSE chunks to count output tokens on the fly. The exact millisecond the cumulative spend exceeds the budget limit, it severs the TCP connection, preventing the fractional overdraft edge case.
+- **Upstream Refund Guard**: If an upstream connection fails or returns an error response, the pre-flight prompt cost is automatically refunded to the user's spend ledger.
 - **Connection Abortion**: Monitors downstream client sockets. If a client terminates a request early, Kilovolt instantly drops the upstream Reqwest socket, canceling downstream transmission and preventing ghost token costs.
 - **Dynamic Configuration**: Supports `.env` loading and system environment variable overrides for quick configuration of listening port and default budgets.
-- **Frictionless Deployment**: Compiles into a single static binary or runs inside a lightweight Docker container.
 
 ---
 
@@ -43,7 +44,6 @@ Kilovolt acts as a zero-copy byte pipeline, meaning it streams payloads and toke
 - **LM Studio** / **LocalAI**
 
 ---
-
 
 ## 🛠️ Configuration Parameters
 
@@ -72,11 +72,7 @@ RUST_LOG=kilovolt=info
 ### 2. Run the Docker Container
 Launch the gateway using your environment settings and expose the configured port:
 ```bash
-docker run -d \
-  --name kilovolt-gateway \
-  -p 8080:8080 \
-  --env-file .env \
-  yodsarun/kilovolt-proxy:latest
+docker run -d --env-file .env -p 8080:8080 yodsarun/kilovolt-proxy:latest
 ```
 
 ---
@@ -111,15 +107,10 @@ curl -X POST http://127.0.0.1:8080/v1/chat/completions \
 
 ---
 
-## 🗺️ Roadmap (V2 Preview)
+## 🗺️ Future Roadmap
 
-### **Strict Mid-Stream Token Cutoff (Overdraft Prevention)**
-Currently, the system uses a **pre-flight** budget check. If a user starts a stream just under budget (e.g., current spend is $0.99 with a budget of $1.00), the request is approved, and the stream completes—allowing a slight fractional overdraft (e.g. ending at $1.07).
-
-In the upcoming **V2** release, Kilovolt will implement an active, **mid-stream circuit breaker**:
-- The `StreamMonitor` will check cumulative bytes dynamically for each yielded token chunk.
-- The exact millisecond the running budget is breached, the monitor will proactively sever the downstream TCP socket and drop the upstream request.
-- This guarantees a hard stop on billing cost, bringing overdraft allowance down to exactly zero.
+- **Automated CI/CD Pipeline**: Transitioning from manual Docker Hub releases to a zero-touch GitHub Actions architecture.
+- **Dynamic Pricing Expansion**: Scaling the internal ledger matrix to support additional upstream LLM providers (Anthropic, Gemini).
 
 ---
 
