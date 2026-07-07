@@ -47,6 +47,7 @@ jobs:
           context: .
           file: ./Dockerfile
           push: true
+          platforms: linux/amd64,linux/arm64
           tags: |
             yodsarun/kilovolt-proxy:latest
             yodsarun/kilovolt-proxy:${{ github.event.release.tag_name }}
