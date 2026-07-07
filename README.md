@@ -76,7 +76,7 @@ docker run -d \
   --name kilovolt-gateway \
   -p 8080:8080 \
   --env-file .env \
-  yodsran/kilovolt-proxy:latest
+  yodsarun/kilovolt-proxy:latest
 ```
 
 ---
