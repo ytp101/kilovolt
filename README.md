@@ -51,8 +51,9 @@ Kilovolt is configured using environment variables or a `.env` file in the worki
 
 | Variable | Default Value | Description |
 | :--- | :--- | :--- |
-| `KILOVOLT_PORT` | `8080` | The local port the proxy server binds to (e.g. `127.0.0.1:8080`). |
+| `KILOVOLT_PORT` | `8080` | The local port the proxy server binds to (e.g. `8080`). |
 | `KILOVOLT_DEFAULT_BUDGET` | `1.00` | The maximum aggregate dollar spend allowed per user (e.g., `1.00` is $1.00 USD). |
+| `BIND_ADDR` / `HOST` | `0.0.0.0` | The network interface address the server binds to. Use `0.0.0.0` to accept external traffic in Docker, or `127.0.0.1` for local-only traffic. |
 | `RUST_LOG` | `kilovolt=info` | Observability and debug logging levels. |
 
 ---
@@ -79,10 +80,12 @@ docker run -d --env-file .env -p 8080:8080 yodsarun/kilovolt-proxy:latest
 
 ## 🔌 API Integration
 
-To route traffic through the Bankruptcy Shield, simply redirect your client's API base URL to Kilovolt and append the custom identity header `X-User-ID`:
+To route traffic through the Bankruptcy Shield, simply redirect your client library's base URL to Kilovolt and append the custom identity header `X-User-ID`.
 
+### 1. Curl (Streaming Request)
+Use the `-N` flag to disable curl's output buffering, enabling you to inspect the token stream in real-time:
 ```bash
-curl -X POST http://127.0.0.1:8080/v1/chat/completions \
+curl -i -N -X POST http://127.0.0.1:8080/v1/chat/completions \
   -H "Authorization: Bearer YOUR_OPENAI_API_KEY" \
   -H "Content-Type: application/json" \
   -H "X-User-ID: developer_1" \
@@ -93,7 +96,7 @@ curl -X POST http://127.0.0.1:8080/v1/chat/completions \
   }'
 ```
 
-- If `developer_1` exceeds the budget limit set by `KILOVOLT_DEFAULT_BUDGET`, Kilovolt immediately short-circuits the connection:
+- If `developer_1` exceeds the budget limit set by `KILOVOLT_DEFAULT_BUDGET`, Kilovolt immediately short-circuits the connection with a standard OpenAI-compatible `429 Too Many Requests` error:
   ```json
   {
     "error": {
@@ -104,6 +107,62 @@ curl -X POST http://127.0.0.1:8080/v1/chat/completions \
     }
   }
   ```
+
+### 2. Python (OpenAI SDK)
+Initialize the standard `openai` library client pointing to the Kilovolt proxy server and pass the tracking identity in `extra_headers`:
+```python
+import os
+from openai import OpenAI
+
+client = OpenAI(
+    api_key=os.environ.get("OPENAI_API_KEY", "your-api-key"),
+    base_url="http://127.0.0.1:8080/v1"
+)
+
+try:
+    response = client.chat.completions.create(
+        model="gpt-4o",
+        messages=[{"role": "user", "content": "Explain async streams."}],
+        stream=True,
+        extra_headers={"X-User-ID": "developer_1"}
+    )
+    for chunk in response:
+        content = chunk.choices[0].delta.content
+        if content:
+            print(content, end="", flush=True)
+except Exception as e:
+    print(f"\nAPI Error: {e}")
+```
+
+### 3. Node.js (OpenAI SDK)
+To integrate Kilovolt in JavaScript/TypeScript backends:
+```javascript
+const { OpenAI } = require('openai');
+
+const openai = new OpenAI({
+  apiKey: process.env.OPENAI_API_KEY || 'your-api-key',
+  baseURL: 'http://127.0.0.1:8080/v1',
+});
+
+async function main() {
+  try {
+    const stream = await openai.chat.completions.create({
+      model: 'gpt-4o',
+      messages: [{ role: 'user', content: 'What is zero-copy stream piping?' }],
+      stream: true,
+    }, {
+      headers: { 'X-User-ID': 'developer_1' }
+    });
+
+    for await (const chunk of stream) {
+      process.stdout.write(chunk.choices[0]?.delta?.content || '');
+    }
+  } catch (err) {
+    console.error('\nAPI Failed:', err.message);
+  }
+}
+main();
+```
 
 ---
 
