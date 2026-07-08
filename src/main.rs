@@ -752,8 +752,17 @@ async fn main() {
         .route("/mock/v1/chat/completions", post(mock_chat_completions))
         .with_state(state);
 
-    // Bind and serve dynamically using KILOVOLT_PORT
-    let addr = format!("127.0.0.1:{}", port);
+    // Bind and serve dynamically using HOST / BIND_ADDR and KILOVOLT_PORT
+    let host = std::env::var("BIND_ADDR")
+        .or_else(|_| std::env::var("HOST"))
+        .unwrap_or_else(|_| "0.0.0.0".to_string());
+
+    let addr = if host.contains(':') {
+        host
+    } else {
+        format!("{}:{}", host, port)
+    };
+
     let listener = match tokio::net::TcpListener::bind(&addr).await {
         Ok(l) => l,
         Err(e) => {
