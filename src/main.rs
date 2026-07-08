@@ -2,14 +2,15 @@ use axum::{
     body::{Body, Bytes},
     extract::State,
     http::{HeaderMap, StatusCode},
-    response::{IntoResponse, Response},
+    response::{Html, IntoResponse, Response},
     routing::{get, post},
     Json, Router,
 };
 use futures_util::stream::{self, Stream, StreamExt};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::pin::Pin;
-use std::sync::{Arc, RwLock};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, RwLock};
 use std::task::{Context, Poll};
 use std::time::Instant;
 use tiktoken_rs::{bpe_for_model, num_tokens_from_messages, ChatCompletionRequestMessage};
@@ -23,6 +24,37 @@ struct AppState {
     spend_tracker: Arc<RwLock<HashMap<String, f64>>>,
     default_budget: f64,
     port: u16,
+
+    // Telemetry and stats tracking
+    start_time: Instant,
+    total_requests: Arc<AtomicUsize>,
+    total_latency_ms: Arc<AtomicU64>,
+    total_tokens_consumed: Arc<AtomicUsize>,
+    recent_requests: Arc<Mutex<VecDeque<RecentRequest>>>,
+}
+
+impl AppState {
+    fn record_request(&self, user_id: &str, model: &str, status: u16, duration_ms: u64) {
+        let timestamp = chrono::Local::now().format("%H:%M:%S").to_string();
+        let record = RecentRequest {
+            timestamp,
+            user_id: user_id.to_string(),
+            model: model.to_string(),
+            status,
+            duration_ms,
+        };
+
+        {
+            let mut list = self.recent_requests.lock().unwrap();
+            list.push_front(record);
+            if list.len() > 5 {
+                list.pop_back();
+            }
+        }
+
+        self.total_requests.fetch_add(1, Ordering::Relaxed);
+        self.total_latency_ms.fetch_add(duration_ms, Ordering::Relaxed);
+    }
 }
 
 // Structs for incoming request body parsing
@@ -165,6 +197,7 @@ struct StreamMonitor<S> {
     total_spend: f64,
     budget_limit: f64,
     output_tokens_count: usize,
+    state: AppState,
 }
 
 impl<S> StreamMonitor<S> {
@@ -177,6 +210,7 @@ impl<S> StreamMonitor<S> {
         prompt_cost: f64,
         total_spend: f64,
         budget_limit: f64,
+        state: AppState,
     ) -> Self {
         let bpe = bpe_for_model(&model)
             .ok()
@@ -199,6 +233,7 @@ impl<S> StreamMonitor<S> {
             total_spend,
             budget_limit,
             output_tokens_count: 0,
+            state,
         }
     }
 
@@ -208,6 +243,7 @@ impl<S> StreamMonitor<S> {
             return;
         }
         let duration = self.start_time.elapsed();
+        let duration_ms = duration.as_millis() as u64;
         let total_output_cost =
             self.output_tokens_count as f64 * self.pricing.output_cost_per_token;
 
@@ -224,6 +260,11 @@ impl<S> StreamMonitor<S> {
             cutoff = %is_cutoff,
             "Stream closed: {}", outcome
         );
+
+        // Record request status for dashboard and average latency tracking
+        let status_code = if is_cutoff { 429 } else { 200 };
+        self.state.record_request(&self.user_id, &self.model, status_code, duration_ms);
+
         self.logged = true;
     }
 }
@@ -281,6 +322,9 @@ where
                                                 let tokens = bpe.encode_with_special_tokens(content);
                                                 let new_tokens = tokens.len();
                                                 this.output_tokens_count += new_tokens;
+
+                                                // Update total tokens consumed globally
+                                                this.state.total_tokens_consumed.fetch_add(new_tokens, Ordering::Relaxed);
 
                                                 // Update state tracker dynamically mid-stream
                                                 let incremental_cost = new_tokens as f64
@@ -356,6 +400,7 @@ async fn chat_completions_proxy(
     body: Body,
 ) -> Response {
     info!("Ingesting POST /v1/chat/completions request");
+    let start_time = Instant::now();
 
     // 1. Extract and validate Authorization header
     let auth_val = match headers.get(axum::http::header::AUTHORIZATION) {
@@ -364,6 +409,7 @@ async fn chat_completions_proxy(
                 Ok(s) => s,
                 Err(_) => {
                     warn!("Invalid UTF-8 in Authorization header");
+                    state.record_request("anonymous", "unknown", 401, start_time.elapsed().as_millis() as u64);
                     return make_error_response(
                         StatusCode::UNAUTHORIZED,
                         "Authorization header contains invalid character set",
@@ -374,6 +420,7 @@ async fn chat_completions_proxy(
             };
             if !val_str.starts_with("Bearer ") {
                 warn!("Authorization header does not start with 'Bearer '");
+                state.record_request("anonymous", "unknown", 401, start_time.elapsed().as_millis() as u64);
                 return make_error_response(
                     StatusCode::UNAUTHORIZED,
                     "Authorization header must start with 'Bearer '",
@@ -385,6 +432,7 @@ async fn chat_completions_proxy(
         }
         None => {
             warn!("Missing Authorization header");
+            state.record_request("anonymous", "unknown", 401, start_time.elapsed().as_millis() as u64);
             return make_error_response(
                 StatusCode::UNAUTHORIZED,
                 "Authorization header is missing",
@@ -401,6 +449,7 @@ async fn chat_completions_proxy(
                 Ok(s) => s,
                 Err(_) => {
                     warn!("Invalid UTF-8 in Content-Type header");
+                    state.record_request("anonymous", "unknown", 400, start_time.elapsed().as_millis() as u64);
                     return make_error_response(
                         StatusCode::BAD_REQUEST,
                         "Content-Type header is invalid",
@@ -411,6 +460,7 @@ async fn chat_completions_proxy(
             };
             if !val_str.starts_with("application/json") {
                 warn!("Unsupported Content-Type: {}", val_str);
+                state.record_request("anonymous", "unknown", 400, start_time.elapsed().as_millis() as u64);
                 return make_error_response(
                     StatusCode::BAD_REQUEST,
                     "Content-Type must be application/json",
@@ -422,6 +472,7 @@ async fn chat_completions_proxy(
         }
         None => {
             warn!("Missing Content-Type header");
+            state.record_request("anonymous", "unknown", 400, start_time.elapsed().as_millis() as u64);
             return make_error_response(
                 StatusCode::BAD_REQUEST,
                 "Content-Type header is missing",
@@ -443,6 +494,7 @@ async fn chat_completions_proxy(
         Ok(b) => b,
         Err(e) => {
             warn!("Failed to read request body bytes: {:?}", e);
+            state.record_request(&user_id, "unknown", 400, start_time.elapsed().as_millis() as u64);
             return make_error_response(
                 StatusCode::BAD_REQUEST,
                 "Failed to read request body",
@@ -457,6 +509,7 @@ async fn chat_completions_proxy(
         Ok(req) => req,
         Err(e) => {
             warn!("Failed to deserialize request JSON: {:?}", e);
+            state.record_request(&user_id, "unknown", 400, start_time.elapsed().as_millis() as u64);
             return make_error_response(
                 StatusCode::BAD_REQUEST,
                 "Invalid JSON payload",
@@ -495,6 +548,9 @@ async fn chat_completions_proxy(
         }
     };
 
+    // Update total tokens consumed globally (prompt tokens first)
+    state.total_tokens_consumed.fetch_add(prompt_tokens, Ordering::Relaxed);
+
     let pricing = get_model_pricing(&request.model);
     let prompt_cost = prompt_tokens as f64 * pricing.input_cost_per_token;
 
@@ -514,6 +570,7 @@ async fn chat_completions_proxy(
             budget_limit = %state.default_budget,
             "Bankruptcy Shield tripped pre-flight: Projected spend exceeds budget limit"
         );
+        state.record_request(&user_id, &request.model, 429, start_time.elapsed().as_millis() as u64);
         return make_error_response(
             StatusCode::TOO_MANY_REQUESTS,
             "Budget Exceeded",
@@ -575,6 +632,7 @@ async fn chat_completions_proxy(
         Err(e) => {
             error!("Failed to connect to upstream: {:?}", e);
             refund_prompt_cost();
+            state.record_request(&user_id, &request.model, 502, start_time.elapsed().as_millis() as u64);
             return make_error_response(
                 StatusCode::BAD_GATEWAY,
                 &format!("Upstream connection failed: {}", e),
@@ -596,6 +654,7 @@ async fn chat_completions_proxy(
             Ok(b) => b,
             Err(e) => {
                 error!("Failed to read upstream error body: {:?}", e);
+                state.record_request(&user_id, &request.model, 502, start_time.elapsed().as_millis() as u64);
                 return make_error_response(
                     StatusCode::BAD_GATEWAY,
                     "Failed to read error details from upstream",
@@ -610,6 +669,8 @@ async fn chat_completions_proxy(
             status,
             error_bytes.len()
         );
+
+        state.record_request(&user_id, &request.model, status.as_u16(), start_time.elapsed().as_millis() as u64);
 
         let mut builder = Response::builder().status(status);
         if let Some(content_type) = headers_clone.get(axum::http::header::CONTENT_TYPE) {
@@ -651,6 +712,7 @@ async fn chat_completions_proxy(
         prompt_cost,
         total_spend,
         state.default_budget,
+        state.clone(), // Pass state to enable stats updates on close/cancel
     );
 
     // Map the stream back to axum::Error to build the Axum response Body
@@ -668,6 +730,309 @@ async fn chat_completions_proxy(
         )
     })
 }
+
+// Struct for dashboard and stats API payloads
+#[derive(serde::Serialize, Clone)]
+struct RecentRequest {
+    timestamp: String,
+    user_id: String,
+    model: String,
+    status: u16,
+    duration_ms: u64,
+}
+
+#[derive(serde::Serialize)]
+struct StatsPayload {
+    health: HealthStats,
+    budget: BudgetStats,
+}
+
+#[derive(serde::Serialize)]
+struct HealthStats {
+    uptime_seconds: u64,
+    memory_usage_kb: usize,
+    avg_latency_ms: f64,
+}
+
+#[derive(serde::Serialize)]
+struct BudgetStats {
+    total_tokens_consumed: usize,
+    default_budget_usd: f64,
+    recent_requests: Vec<RecentRequest>,
+    current_spend_by_user: HashMap<String, f64>,
+}
+
+/// Helper function to retrieve RSS memory usage of the current process on Linux.
+fn get_memory_usage_kb() -> usize {
+    #[cfg(target_os = "linux")]
+    {
+        if let Ok(status) = std::fs::read_to_string("/proc/self/status") {
+            for line in status.lines() {
+                if line.starts_with("VmRSS:") {
+                    let parts: Vec<&str> = line.split_whitespace().collect();
+                    if parts.len() >= 2 {
+                        if let Ok(kb) = parts[1].parse::<usize>() {
+                            return kb;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    // Fallback/mock RSS memory usage (e.g. 15MB) when running locally on macOS
+    15360
+}
+
+/// REST endpoint `/api/stats` to expose server telemetry and budget state.
+async fn get_stats(State(state): State<AppState>) -> Response {
+    let uptime = state.start_time.elapsed().as_secs();
+    let memory_usage = get_memory_usage_kb();
+
+    let total_reqs = state.total_requests.load(Ordering::Relaxed);
+    let total_lat = state.total_latency_ms.load(Ordering::Relaxed);
+    let avg_latency = if total_reqs > 0 {
+        total_lat as f64 / total_reqs as f64
+    } else {
+        0.0
+    };
+
+    let recent = {
+        let list = state.recent_requests.lock().unwrap();
+        list.iter().cloned().collect::<Vec<RecentRequest>>()
+    };
+
+    let ledger = {
+        let map = state.spend_tracker.read().unwrap();
+        map.clone()
+    };
+
+    let payload = StatsPayload {
+        health: HealthStats {
+            uptime_seconds: uptime,
+            memory_usage_kb: memory_usage,
+            avg_latency_ms: avg_latency,
+        },
+        budget: BudgetStats {
+            total_tokens_consumed: state.total_tokens_consumed.load(Ordering::Relaxed),
+            default_budget_usd: state.default_budget,
+            recent_requests: recent,
+            current_spend_by_user: ledger,
+        },
+    };
+
+    (StatusCode::OK, Json(payload)).into_response()
+}
+
+/// Route handler to render the embedded HTML dashboard.
+async fn get_dashboard() -> impl IntoResponse {
+    Html(DASHBOARD_HTML)
+}
+
+// Embedded dashboard HTML template using Tailwind CSS via CDN and vanilla JS polling
+const DASHBOARD_HTML: &str = r#"<!DOCTYPE html>
+<html lang="en" class="h-full bg-slate-950 text-slate-100">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Kilovolt Dashboard ⚡</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {
+                    colors: {
+                        brand: {
+                            50: '#fefcf0',
+                            100: '#fdf7d5',
+                            500: '#eab308',
+                            900: '#713f12',
+                        }
+                    }
+                }
+            }
+        }
+    </script>
+</head>
+<body class="min-h-full flex flex-col font-sans">
+    <header class="border-b border-slate-800 bg-slate-900/50 backdrop-blur-md sticky top-0 z-50">
+        <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-16 flex items-center justify-between">
+            <div class="flex items-center space-x-3">
+                <span class="text-2xl">⚡</span>
+                <span class="text-xl font-bold tracking-tight bg-gradient-to-r from-yellow-400 to-amber-500 bg-clip-text text-transparent">Kilovolt Admin</span>
+            </div>
+            <div class="flex items-center space-x-2">
+                <span id="status-dot" class="h-2.5 w-2.5 rounded-full bg-green-500 animate-pulse"></span>
+                <span id="status-text" class="text-xs text-slate-400 font-medium">Live</span>
+            </div>
+        </div>
+    </header>
+
+    <main class="flex-grow max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-8">
+        <!-- Stats Overview Grid -->
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+            <!-- Card: System Health -->
+            <div class="bg-slate-900/60 border border-slate-800 rounded-2xl p-6 shadow-xl backdrop-blur-sm hover:border-slate-700 transition duration-300">
+                <div class="flex items-center justify-between mb-6">
+                    <h2 class="text-lg font-semibold text-slate-200 flex items-center space-x-2">
+                        <span>🖥️</span>
+                        <span>System Health</span>
+                    </h2>
+                    <span class="text-xs bg-slate-800 text-slate-400 px-2.5 py-1 rounded-full font-mono">Metrics</span>
+                </div>
+                <div class="grid grid-cols-2 gap-4">
+                    <div class="bg-slate-950/60 p-4 rounded-xl border border-slate-850">
+                        <p class="text-xs text-slate-500 font-medium uppercase tracking-wider">Uptime</p>
+                        <p id="uptime" class="text-xl font-bold text-slate-100 mt-1 font-mono">-</p>
+                    </div>
+                    <div class="bg-slate-950/60 p-4 rounded-xl border border-slate-850">
+                        <p class="text-xs text-slate-500 font-medium uppercase tracking-wider">Memory RSS</p>
+                        <p id="memory" class="text-xl font-bold text-slate-100 mt-1 font-mono">-</p>
+                    </div>
+                    <div class="bg-slate-950/60 p-4 rounded-xl border border-slate-850 col-span-2">
+                        <p class="text-xs text-slate-500 font-medium uppercase tracking-wider">Average Latency</p>
+                        <p id="latency" class="text-2xl font-black text-amber-400 mt-1 font-mono">-</p>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Card: Budget Pipeline -->
+            <div class="bg-slate-900/60 border border-slate-800 rounded-2xl p-6 shadow-xl backdrop-blur-sm hover:border-slate-700 transition duration-300">
+                <div class="flex items-center justify-between mb-6">
+                    <h2 class="text-lg font-semibold text-slate-200 flex items-center space-x-2">
+                        <span>🛡️</span>
+                        <span>Budget Pipeline</span>
+                    </h2>
+                    <span class="text-xs bg-slate-800 text-slate-400 px-2.5 py-1 rounded-full font-mono">Ledger</span>
+                </div>
+                <div class="grid grid-cols-2 gap-4">
+                    <div class="bg-slate-950/60 p-4 rounded-xl border border-slate-850">
+                        <p class="text-xs text-slate-500 font-medium uppercase tracking-wider">Total Tokens</p>
+                        <p id="total-tokens" class="text-xl font-bold text-slate-100 mt-1 font-mono">-</p>
+                    </div>
+                    <div class="bg-slate-950/60 p-4 rounded-xl border border-slate-850">
+                        <p class="text-xs text-slate-500 font-medium uppercase tracking-wider">Default Budget</p>
+                        <p id="default-budget" class="text-xl font-bold text-slate-100 mt-1 font-mono">-</p>
+                    </div>
+                    <div class="bg-slate-950/60 p-4 rounded-xl border border-slate-850 col-span-2">
+                        <p class="text-xs text-slate-500 font-medium uppercase tracking-wider">Active Users Ledger</p>
+                        <div id="ledger-list" class="mt-2 space-y-1.5 max-h-24 overflow-y-auto text-sm">
+                            <p class="text-slate-500 text-xs italic">No active users yet.</p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Recent Logs / Requests -->
+        <div class="bg-slate-900/40 border border-slate-800 rounded-2xl p-6 shadow-xl">
+            <h2 class="text-lg font-semibold text-slate-200 mb-4 flex items-center space-x-2">
+                <span>📋</span>
+                <span>Recent Proxy Transactions</span>
+            </h2>
+            <div class="overflow-x-auto">
+                <table class="min-w-full divide-y divide-slate-800 text-sm">
+                    <thead>
+                        <tr class="text-slate-400 font-medium text-left">
+                            <th class="py-3 px-4">Time</th>
+                            <th class="py-3 px-4">User ID</th>
+                            <th class="py-3 px-4">Model</th>
+                            <th class="py-3 px-4">Status</th>
+                            <th class="py-3 px-4">Latency</th>
+                        </tr>
+                    </thead>
+                    <tbody id="recent-requests-table" class="divide-y divide-slate-800/60 text-slate-300 font-mono">
+                        <tr>
+                            <td colspan="5" class="py-4 text-center text-slate-500 italic">Waiting for traffic...</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </main>
+
+    <footer class="border-t border-slate-900 bg-slate-950/80 py-4 text-center text-xs text-slate-600">
+        Kilovolt Reverse Proxy Engine &copy; 2026. Made with Rust and Async speed.
+    </footer>
+
+    <script>
+        function formatUptime(seconds) {
+            const h = Math.floor(seconds / 3600);
+            const m = Math.floor((seconds % 3600) / 60);
+            const s = seconds % 60;
+            return `${h}h ${m}m ${s}s`;
+        }
+
+        async function fetchStats() {
+            try {
+                const response = await fetch('/api/stats');
+                if (!response.ok) throw new Error('API down');
+                const data = await response.json();
+
+                // System Health Updates
+                document.getElementById('uptime').innerText = formatUptime(data.health.uptime_seconds);
+                document.getElementById('memory').innerText = `${(data.health.memory_usage_kb / 1024).toFixed(2)} MB`;
+                document.getElementById('latency').innerText = `${data.health.avg_latency_ms.toFixed(2)} ms`;
+
+                // Budget Pipeline Updates
+                document.getElementById('total-tokens').innerText = data.budget.total_tokens_consumed.toLocaleString();
+                document.getElementById('default-budget').innerText = `$${data.budget.default_budget_usd.toFixed(4)}`;
+
+                // Render ledger
+                const ledgerList = document.getElementById('ledger-list');
+                ledgerList.innerHTML = '';
+                const users = Object.entries(data.budget.current_spend_by_user);
+                if (users.length === 0) {
+                    ledgerList.innerHTML = '<p class="text-slate-500 text-xs italic">No active users yet.</p>';
+                } else {
+                    users.forEach(([user, spend]) => {
+                        const isOver = spend >= data.budget.default_budget_usd;
+                        const statusClass = isOver ? 'text-red-400 font-bold' : 'text-green-400';
+                        ledgerList.innerHTML += `
+                            <div class="flex justify-between items-center bg-slate-950/80 px-3 py-1 rounded border border-slate-800/40">
+                                <span class="font-medium text-slate-400">${user}</span>
+                                <span class="${statusClass}">$${spend.toFixed(5)}</span>
+                            </div>
+                        `;
+                    });
+                }
+
+                // Render recent requests
+                const tableBody = document.getElementById('recent-requests-table');
+                tableBody.innerHTML = '';
+                if (data.budget.recent_requests.length === 0) {
+                    tableBody.innerHTML = '<tr><td colspan="5" class="py-4 text-center text-slate-500 italic">Waiting for traffic...</td></tr>';
+                } else {
+                    data.budget.recent_requests.forEach(req => {
+                        const statusClass = req.status >= 400 ? 'text-red-400' : 'text-green-400';
+                        tableBody.innerHTML += `
+                            <tr class="hover:bg-slate-900/30 transition">
+                                <td class="py-3 px-4 text-slate-500">${req.timestamp}</td>
+                                <td class="py-3 px-4 font-bold text-slate-300">${req.user_id}</td>
+                                <td class="py-3 px-4 text-slate-400">${req.model}</td>
+                                <td class="py-3 px-4"><span class="px-2 py-0.5 rounded text-xs font-bold ${statusClass} bg-slate-950 border border-slate-800">${req.status}</span></td>
+                                <td class="py-3 px-4 text-amber-500 font-semibold">${req.duration_ms} ms</td>
+                            </tr>
+                        `;
+                    });
+                }
+
+                // Status Dot indicator
+                document.getElementById('status-dot').className = 'h-2.5 w-2.5 rounded-full bg-green-500 animate-pulse';
+                document.getElementById('status-text').innerText = 'Live';
+            } catch (err) {
+                console.error(err);
+                document.getElementById('status-dot').className = 'h-2.5 w-2.5 rounded-full bg-red-500 animate-ping';
+                document.getElementById('status-text').innerText = 'Disconnected';
+            }
+        }
+
+        // Poll every 3 seconds
+        setInterval(fetchStats, 3000);
+        // Initial load
+        fetchStats();
+    </script>
+</body>
+</html>"#;
 
 /// Helper function to listen for SIGINT or SIGTERM signals and begin graceful draining.
 async fn shutdown_signal() {
@@ -743,19 +1108,27 @@ async fn main() {
         spend_tracker,
         default_budget,
         port,
+        start_time: Instant::now(),
+        total_requests: Arc::new(AtomicUsize::new(0)),
+        total_latency_ms: Arc::new(AtomicU64::new(0)),
+        total_tokens_consumed: Arc::new(AtomicUsize::new(0)),
+        recent_requests: Arc::new(Mutex::new(VecDeque::new())),
     };
 
     // Build the Axum Router
     let app = Router::new()
         .route("/health", get(health_check))
+        .route("/dashboard", get(get_dashboard))
+        .route("/api/stats", get(get_stats))
         .route("/v1/chat/completions", post(chat_completions_proxy))
         .route("/mock/v1/chat/completions", post(mock_chat_completions))
         .with_state(state);
 
     // Bind and serve dynamically using HOST / BIND_ADDR and KILOVOLT_PORT
     let host = std::env::var("BIND_ADDR")
-        .or_else(|_| std::env::var("HOST"))
-        .unwrap_or_else(|_| "0.0.0.0".to_string());
+        .ok()
+        .or_else(|| std::env::var("HOST").ok())
+        .unwrap_or_else(|| "0.0.0.0".to_string());
 
     let addr = if host.contains(':') {
         host
