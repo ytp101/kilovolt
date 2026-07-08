@@ -104,6 +104,7 @@ pub async fn chat_completions_proxy(
 ) -> Response {
     info!("Ingesting POST /v1/chat/completions request");
     let start_time = Instant::now();
+    let request_id = uuid::Uuid::new_v4().to_string();
 
     // 1. Extract and validate Authorization header
     let auth_val = match headers.get(axum::http::header::AUTHORIZATION) {
@@ -112,7 +113,7 @@ pub async fn chat_completions_proxy(
                 Ok(s) => s,
                 Err(_) => {
                     warn!("Invalid UTF-8 in Authorization header");
-                    state.record_request("anonymous", "unknown", 401, start_time.elapsed().as_millis() as u64);
+                    state.record_request(&request_id, "anonymous", "unknown", 401, start_time.elapsed().as_millis() as u64, 0, 0.0);
                     return make_error_response(
                         StatusCode::UNAUTHORIZED,
                         "Authorization header contains invalid character set",
@@ -123,7 +124,7 @@ pub async fn chat_completions_proxy(
             };
             if !val_str.starts_with("Bearer ") {
                 warn!("Authorization header does not start with 'Bearer '");
-                state.record_request("anonymous", "unknown", 401, start_time.elapsed().as_millis() as u64);
+                state.record_request(&request_id, "anonymous", "unknown", 401, start_time.elapsed().as_millis() as u64, 0, 0.0);
                 return make_error_response(
                     StatusCode::UNAUTHORIZED,
                     "Authorization header must start with 'Bearer '",
@@ -135,7 +136,7 @@ pub async fn chat_completions_proxy(
         }
         None => {
             warn!("Missing Authorization header");
-            state.record_request("anonymous", "unknown", 401, start_time.elapsed().as_millis() as u64);
+            state.record_request(&request_id, "anonymous", "unknown", 401, start_time.elapsed().as_millis() as u64, 0, 0.0);
             return make_error_response(
                 StatusCode::UNAUTHORIZED,
                 "Authorization header is missing",
@@ -152,7 +153,7 @@ pub async fn chat_completions_proxy(
                 Ok(s) => s,
                 Err(_) => {
                     warn!("Invalid UTF-8 in Content-Type header");
-                    state.record_request("anonymous", "unknown", 400, start_time.elapsed().as_millis() as u64);
+                    state.record_request(&request_id, "anonymous", "unknown", 400, start_time.elapsed().as_millis() as u64, 0, 0.0);
                     return make_error_response(
                         StatusCode::BAD_REQUEST,
                         "Content-Type header is invalid",
@@ -163,7 +164,7 @@ pub async fn chat_completions_proxy(
             };
             if !val_str.starts_with("application/json") {
                 warn!("Unsupported Content-Type: {}", val_str);
-                state.record_request("anonymous", "unknown", 400, start_time.elapsed().as_millis() as u64);
+                state.record_request(&request_id, "anonymous", "unknown", 400, start_time.elapsed().as_millis() as u64, 0, 0.0);
                 return make_error_response(
                     StatusCode::BAD_REQUEST,
                     "Content-Type must be application/json",
@@ -175,7 +176,7 @@ pub async fn chat_completions_proxy(
         }
         None => {
             warn!("Missing Content-Type header");
-            state.record_request("anonymous", "unknown", 400, start_time.elapsed().as_millis() as u64);
+            state.record_request(&request_id, "anonymous", "unknown", 400, start_time.elapsed().as_millis() as u64, 0, 0.0);
             return make_error_response(
                 StatusCode::BAD_REQUEST,
                 "Content-Type header is missing",
@@ -197,7 +198,7 @@ pub async fn chat_completions_proxy(
         Ok(b) => b,
         Err(e) => {
             warn!("Failed to read request body bytes: {:?}", e);
-            state.record_request(&user_id, "unknown", 400, start_time.elapsed().as_millis() as u64);
+            state.record_request(&request_id, &user_id, "unknown", 400, start_time.elapsed().as_millis() as u64, 0, 0.0);
             return make_error_response(
                 StatusCode::BAD_REQUEST,
                 "Failed to read request body",
@@ -212,7 +213,7 @@ pub async fn chat_completions_proxy(
         Ok(req) => req,
         Err(e) => {
             warn!("Failed to deserialize request JSON: {:?}", e);
-            state.record_request(&user_id, "unknown", 400, start_time.elapsed().as_millis() as u64);
+            state.record_request(&request_id, &user_id, "unknown", 400, start_time.elapsed().as_millis() as u64, 0, 0.0);
             return make_error_response(
                 StatusCode::BAD_REQUEST,
                 "Invalid JSON payload",
@@ -273,7 +274,7 @@ pub async fn chat_completions_proxy(
             budget_limit = %state.default_budget,
             "Bankruptcy Shield tripped pre-flight: Projected spend exceeds budget limit"
         );
-        state.record_request(&user_id, &request.model, 429, start_time.elapsed().as_millis() as u64);
+        state.record_request(&request_id, &user_id, &request.model, 429, start_time.elapsed().as_millis() as u64, prompt_tokens, prompt_cost);
         return make_error_response(
             StatusCode::TOO_MANY_REQUESTS,
             "Budget Exceeded",
@@ -335,7 +336,7 @@ pub async fn chat_completions_proxy(
         Err(e) => {
             error!("Failed to connect to upstream: {:?}", e);
             refund_prompt_cost();
-            state.record_request(&user_id, &request.model, 502, start_time.elapsed().as_millis() as u64);
+            state.record_request(&request_id, &user_id, &request.model, 502, start_time.elapsed().as_millis() as u64, prompt_tokens, 0.0);
             return make_error_response(
                 StatusCode::BAD_GATEWAY,
                 &format!("Upstream connection failed: {}", e),
@@ -357,7 +358,7 @@ pub async fn chat_completions_proxy(
             Ok(b) => b,
             Err(e) => {
                 error!("Failed to read upstream error body: {:?}", e);
-                state.record_request(&user_id, &request.model, 502, start_time.elapsed().as_millis() as u64);
+                state.record_request(&request_id, &user_id, &request.model, 502, start_time.elapsed().as_millis() as u64, prompt_tokens, 0.0);
                 return make_error_response(
                     StatusCode::BAD_GATEWAY,
                     "Failed to read error details from upstream",
@@ -373,7 +374,7 @@ pub async fn chat_completions_proxy(
             error_bytes.len()
         );
 
-        state.record_request(&user_id, &request.model, status.as_u16(), start_time.elapsed().as_millis() as u64);
+        state.record_request(&request_id, &user_id, &request.model, status.as_u16(), start_time.elapsed().as_millis() as u64, prompt_tokens, 0.0);
 
         let mut builder = Response::builder().status(status);
         if let Some(content_type) = headers_clone.get(axum::http::header::CONTENT_TYPE) {
@@ -408,10 +409,12 @@ pub async fn chat_completions_proxy(
     let raw_stream: BoxedByteStream = Box::pin(upstream_res.bytes_stream());
     let monitored_stream = StreamMonitor::new(
         raw_stream,
+        request_id,
         user_id,
         state.spend_tracker.clone(),
         request.model,
         pricing,
+        prompt_tokens,
         prompt_cost,
         total_spend,
         state.default_budget,

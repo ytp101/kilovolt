@@ -52,10 +52,12 @@ pub struct StreamMonitor<S> {
     pub bytes_written: usize,
     pub chunks_written: usize,
     pub logged: bool,
+    pub request_id: String,
     pub user_id: String,
     pub spend_tracker: Arc<RwLock<HashMap<String, f64>>>,
     pub model: String,
     pub pricing: ModelPricing,
+    pub prompt_tokens: usize,
     pub prompt_cost: f64,
     pub bpe: Option<tiktoken_rs::CoreBPE>,
     pub accumulated_text: String,
@@ -68,10 +70,12 @@ pub struct StreamMonitor<S> {
 impl<S> StreamMonitor<S> {
     pub fn new(
         inner: S,
+        request_id: String,
         user_id: String,
         spend_tracker: Arc<RwLock<HashMap<String, f64>>>,
         model: String,
         pricing: ModelPricing,
+        prompt_tokens: usize,
         prompt_cost: f64,
         total_spend: f64,
         budget_limit: f64,
@@ -88,10 +92,12 @@ impl<S> StreamMonitor<S> {
             bytes_written: 0,
             chunks_written: 0,
             logged: false,
+            request_id,
             user_id,
             spend_tracker,
             model,
             pricing,
+            prompt_tokens,
             prompt_cost,
             bpe,
             accumulated_text: String::new(),
@@ -128,7 +134,18 @@ impl<S> StreamMonitor<S> {
 
         // Record request status for dashboard and average latency tracking
         let status_code = if is_cutoff { 429 } else { 200 };
-        self.state.record_request(&self.user_id, &self.model, status_code, duration_ms);
+        let total_tokens = self.prompt_tokens + self.output_tokens_count;
+        let request_cost = self.prompt_cost + total_output_cost;
+
+        self.state.record_request(
+            &self.request_id,
+            &self.user_id,
+            &self.model,
+            status_code,
+            duration_ms,
+            total_tokens,
+            request_cost,
+        );
 
         self.logged = true;
     }

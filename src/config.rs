@@ -19,14 +19,26 @@ pub struct AppState {
 }
 
 impl AppState {
-    pub fn record_request(&self, user_id: &str, model: &str, status: u16, duration_ms: u64) {
+    pub fn record_request(
+        &self,
+        request_id: &str,
+        user_id: &str,
+        model: &str,
+        status: u16,
+        duration_ms: u64,
+        tokens: usize,
+        cost: f64,
+    ) {
         let timestamp = chrono::Local::now().format("%H:%M:%S").to_string();
         let record = RecentRequest {
+            request_id: request_id.to_string(),
             timestamp,
             user_id: user_id.to_string(),
             model: model.to_string(),
             status,
             duration_ms,
+            tokens,
+            cost,
         };
 
         {
@@ -45,9 +57,12 @@ impl AppState {
 // Struct for dashboard and stats API payloads
 #[derive(serde::Serialize, Clone)]
 pub struct RecentRequest {
+    pub request_id: String,
     pub timestamp: String,
     pub user_id: String,
     pub model: String,
     pub status: u16,
     pub duration_ms: u64,
+    pub tokens: usize,
+    pub cost: f64,
 }

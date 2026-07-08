@@ -201,16 +201,19 @@ const DASHBOARD_HTML: &str = r#"<!DOCTYPE html>
                 <table class="min-w-full divide-y divide-slate-800 text-sm">
                     <thead>
                         <tr class="text-slate-400 font-medium text-left">
+                            <th class="py-3 px-4">Request ID</th>
                             <th class="py-3 px-4">Time</th>
                             <th class="py-3 px-4">User ID</th>
                             <th class="py-3 px-4">Model</th>
+                            <th class="py-3 px-4 text-right">Tokens</th>
+                            <th class="py-3 px-4 text-right">Cost</th>
                             <th class="py-3 px-4">Status</th>
-                            <th class="py-3 px-4">Latency</th>
+                            <th class="py-3 px-4 text-right">Latency</th>
                         </tr>
                     </thead>
                     <tbody id="recent-requests-table" class="divide-y divide-slate-800/60 text-slate-300 font-mono">
                         <tr>
-                            <td colspan="5" class="py-4 text-center text-slate-500 italic">Waiting for traffic...</td>
+                            <td colspan="8" class="py-4 text-center text-slate-500 italic">Waiting for traffic...</td>
                         </tr>
                     </tbody>
                 </table>
@@ -268,17 +271,22 @@ const DASHBOARD_HTML: &str = r#"<!DOCTYPE html>
                 const tableBody = document.getElementById('recent-requests-table');
                 tableBody.innerHTML = '';
                 if (data.budget.recent_requests.length === 0) {
-                    tableBody.innerHTML = '<tr><td colspan="5" class="py-4 text-center text-slate-500 italic">Waiting for traffic...</td></tr>';
+                    tableBody.innerHTML = '<tr><td colspan="8" class="py-4 text-center text-slate-500 italic">Waiting for traffic...</td></tr>';
                 } else {
                     data.budget.recent_requests.forEach(req => {
                         const statusClass = req.status >= 400 ? 'text-red-400' : 'text-green-400';
+                        const shortReqId = req.request_id ? `${req.request_id.slice(0, 8)}...` : 'n/a';
+                        
                         tableBody.innerHTML += `
                             <tr class="hover:bg-slate-900/30 transition">
-                                <td class="py-3 px-4 text-slate-500">${req.timestamp}</td>
+                                <td class="py-3 px-4 text-slate-500 font-mono">${shortReqId}</td>
+                                <td class="py-3 px-4 text-slate-400">${req.timestamp}</td>
                                 <td class="py-3 px-4 font-bold text-slate-300">${req.user_id}</td>
                                 <td class="py-3 px-4 text-slate-400">${req.model}</td>
+                                <td class="py-3 px-4 text-right text-slate-300">${req.tokens.toLocaleString()}</td>
+                                <td class="py-3 px-4 text-right text-emerald-400 font-semibold">$${req.cost.toFixed(5)}</td>
                                 <td class="py-3 px-4"><span class="px-2 py-0.5 rounded text-xs font-bold ${statusClass} bg-slate-950 border border-slate-800">${req.status}</span></td>
-                                <td class="py-3 px-4 text-amber-500 font-semibold">${req.duration_ms} ms</td>
+                                <td class="py-3 px-4 text-right text-amber-500 font-semibold">${req.duration_ms} ms</td>
                             </tr>
                         `;
                     });

@@ -17,3 +17,5 @@ http-body-util = "0.1"
 dotenvy = "0.15"
 tiktoken-rs = "0.12"
 chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1.0", features = ["v4", "serde"] }
+
