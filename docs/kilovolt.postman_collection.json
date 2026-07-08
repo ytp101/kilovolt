@@ -1,0 +1,132 @@
+{
+	"info": {
+		"_postman_id": "893b91ac-aada-439c-a82d-9ad92799f512",
+		"name": "Kilovolt Gateway API",
+		"description": "Postman Collection for testing the Kilovolt (kvlt) Reverse Proxy and Bankruptcy Shield.",
+		"schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+	},
+	"item": [
+		{
+			"name": "Health Check Probe",
+			"request": {
+				"method": "GET",
+				"header": [],
+				"url": {
+					"raw": "http://localhost:8080/health",
+					"protocol": "http",
+					"host": [
+						"localhost"
+					],
+					"port": "8080",
+					"path": [
+						"health"
+					]
+				},
+				"description": "Checks the availability of the Kilovolt reverse proxy server."
+			},
+			"response": []
+		},
+		{
+			"name": "Proxy Chat Completions (OpenAI Upstream)",
+			"request": {
+				"method": "POST",
+				"header": [
+					{
+						"key": "Content-Type",
+						"value": "application/json",
+						"type": "text"
+					},
+					{
+						"key": "Authorization",
+						"value": "Bearer YOUR_OPENAI_API_KEY",
+						"type": "text",
+						"description": "Replace with your official OpenAI API key"
+					},
+					{
+						"key": "X-User-ID",
+						"value": "developer_1",
+						"type": "text",
+						"description": "Identity header used for budget tracking"
+					}
+				],
+				"body": {
+					"mode": "raw",
+					"raw": "{\n  \"model\": \"gpt-4o\",\n  \"messages\": [\n    {\n      \"role\": \"user\",\n      \"content\": \"Hello Kilovolt! Write a 3-word greeting.\"\n    }\n  ],\n  \"stream\": true\n}",
+					"options": {
+						"raw": {
+							"language": "json"
+						}
+					}
+				},
+				"url": {
+					"raw": "http://localhost:8080/v1/chat/completions",
+					"protocol": "http",
+					"host": [
+						"localhost"
+					],
+					"port": "8080",
+					"path": [
+						"v1",
+						"chat",
+						"completions"
+					]
+				},
+				"description": "Proxies a streaming completions request to OpenAI, charging the pre-flight prompt cost and monitoring output tokens mid-stream."
+			},
+			"response": []
+		},
+		{
+			"name": "Proxy Chat Completions (Mock Upstream Test)",
+			"request": {
+				"method": "POST",
+				"header": [
+					{
+						"key": "Content-Type",
+						"value": "application/json",
+						"type": "text"
+					},
+					{
+						"key": "Authorization",
+						"value": "Bearer mock_token",
+						"type": "text"
+					},
+					{
+						"key": "X-User-ID",
+						"value": "tester_user",
+						"type": "text"
+					},
+					{
+						"key": "X-Mock-Upstream",
+						"value": "true",
+						"type": "text",
+						"description": "Forces Kilovolt to route to its internal mock upstream, bypassing OpenAI"
+					}
+				],
+				"body": {
+					"mode": "raw",
+					"raw": "{\n  \"model\": \"gpt-4o\",\n  \"messages\": [\n    {\n      \"role\": \"user\",\n      \"content\": \"Hello world!\"\n    }\n  ],\n  \"stream\": true\n}",
+					"options": {
+						"raw": {
+							"language": "json"
+						}
+					}
+				},
+				"url": {
+					"raw": "http://localhost:8080/v1/chat/completions",
+					"protocol": "http",
+					"host": [
+						"localhost"
+					],
+					"port": "8080",
+					"path": [
+						"v1",
+						"chat",
+						"completions"
+					]
+				},
+				"description": "Runs a proxy request using the mock upstream server. Ideal for verifying budget limits, streaming chunks, and mid-stream cutoffs."
+			},
+			"response": []
+		}
+	]
+}
