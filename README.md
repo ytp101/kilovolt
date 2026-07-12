@@ -52,7 +52,7 @@ Deploy the Bankruptcy Shield gateway instantly with zero local dependencies.
 
 Create a `.env` file in your project directory.
 
-```
+```env
 KILOVOLT_PORT=8080
 KILOVOLT_DEFAULT_BUDGET=5.00
 RUST_LOG=kilovolt=info
@@ -62,8 +62,8 @@ RUST_LOG=kilovolt=info
 
 Expose the proxy and mount your configuration using Docker.
 
-```
-docker run -d --env-file .env -p 8080:8080 yodsarun/kilovolt-proxy:v1.2.0
+```bash
+docker run -d --env-file .env -p 8080:8080 yodsarun/kilovolt-proxy:latest
 ```
 
 ## 🔌 API Integration (Drop-In Replacement)
@@ -72,7 +72,7 @@ To route traffic through the Bankruptcy Shield, simply redirect your client libr
 
 ### Python (OpenAI SDK)
 
-```
+```python
 import os
 from openai import OpenAI
 
@@ -98,7 +98,7 @@ except Exception as e:
 
 ### Node.js (OpenAI SDK)
 
-```
+```js
 const { OpenAI } = require('openai');
 
 const openai = new OpenAI({
