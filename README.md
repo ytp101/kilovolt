@@ -17,7 +17,7 @@ Furthermore, standard enterprise API gateways often buffer large token streams e
 1. **Zero-Memory Bloat:** It intercepts OpenAI-compatible API traffic and pipes the streaming tokens back to client applications with a strictly flat, non-expanding memory footprint ($O(1)$ space complexity).
 2. **Hard-Cut Budget Enforcement:** It calculates token costs mid-stream and cuts the TCP connection the exact millisecond a user breaches their budget—stopping runway burn dead in its tracks.
 
-*(Insert GIF here showing a fast-scrolling terminal output of an LLM response suddenly stopping with a `[Connection Terminated: Budget Exceeded]` error).*
+![Kilovolt Budget Limit Circuit Breaker](kilo-volt.gif)
 
 ## 🚀 Core Features
 
