@@ -1,122 +1,84 @@
 # Kilovolt (kvlt) ⚡
 
-[![Rust](https://img.shields.io/badge/rust-stable-brightgreen.svg)](https://www.rust-lang.org)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Rust](https://img.shields.io/badge/rust-stable-brightgreen.svg)](https://www.rust-lang.org) [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-**Kilovolt (kvlt)** is a hyper-optimized, high-throughput asynchronous reverse proxy designed to act as a **Bankruptcy Shield** for independent developers, startups, and coding agents running AI applications on low-resource hardware (such as a $5/month VPS). 
+**Kilovolt (kvlt)** is a hyper-optimized, high-throughput asynchronous reverse proxy designed to act as a **Bankruptcy Shield** for independent developers, startups, and coding agents running AI applications on low-resource hardware.
 
-It intercepts OpenAI-compatible API traffic on localhost, proxies it upstream to official providers, and pipes the streaming tokens back to client applications with a strictly flat, non-expanding memory footprint ($O(1)$ space complexity) to completely eliminate memory-inflation crashes.
+*(The Kilovolt v1.2.0 Telemetry Dashboard: Monitoring memory footprint and real-time API spend.)*
 
----
+## 💡 Why Kilovolt? (The "Bleeding Neck" Problem)
 
-## 💡 The Value Proposition
+When running high-volume LLM pipelines or autonomous agents, relying on the provider's built-in global rate limits is not enough. A single unchecked `while` loop during local development, or a rogue downstream client spamming your endpoint, can burn thousands of dollars overnight.
 
-When running high-volume LLM pipelines on small virtual servers, standard gateway integrations can cause major memory leaks and unexpected cloud charges:
-1. **OOM Crashes**: Buffering large token streams into memory before sending them downstream quickly consumes VPS heap space, resulting in Out-Of-Memory (OOM) process terminations.
-2. **Ghost Billing**: If a downstream client abruptly disconnects mid-stream, many API integrations continue downloading and billing for upstream tokens.
-3. **Bankruptcy Shield**: Kilovolt tracks user budgets in memory and trips a low-latency circuit breaker both pre-flight and mid-stream the exact millisecond a user exceeds their limit—preventing runaway costs and fractional overdrafts.
+Furthermore, standard enterprise API gateways often buffer large token streams entirely into memory before forwarding them. On a $5/month VPS, this rapidly consumes the server's heap space, resulting in catastrophic Out-of-Memory (OOM) crashes.
 
----
+**Kilovolt solves this by operating as a highly performant financial circuit breaker:**
+
+1. **Zero-Memory Bloat:** It intercepts OpenAI-compatible API traffic and pipes the streaming tokens back to client applications with a strictly flat, non-expanding memory footprint ($O(1)$ space complexity).
+2. **Hard-Cut Budget Enforcement:** It calculates token costs mid-stream and cuts the TCP connection the exact millisecond a user breaches their budget—stopping runway burn dead in its tracks.
+
+*(Insert GIF here showing a fast-scrolling terminal output of an LLM response suddenly stopping with a `[Connection Terminated: Budget Exceeded]` error).*
 
 ## 🚀 Core Features
 
 - **Zero-Copy Stream Piping**: Pipes byte-chunks from OpenAI's SSE (`text/event-stream`) directly to client sockets. The gateway's memory footprint remains flat regardless of the size or duration of the chat stream.
-- **Pre-Flight Prompt Validation**: Inspects incoming payloads, calculates prompt tokens using tiktoken BPE, projects the USD cost based on model-specific rates, and rejects requests with `429 Too Many Requests` if the user is over budget.
-- **Mid-Stream Circuit Breaker**: Actively parses streaming SSE chunks to count output tokens on the fly. The exact millisecond the cumulative spend exceeds the budget limit, it severs the TCP connection, preventing the fractional overdraft edge case.
+- **Pre-Flight Prompt Validation**: Inspects incoming payloads, calculates prompt tokens using tiktoken BPE, projects the USD cost, and rejects requests with `429 Too Many Requests` if the user is over budget.
+- **Mid-Stream Circuit Breaker**: Actively parses streaming SSE chunks to count output tokens on the fly. The exact millisecond the cumulative spend exceeds the budget limit, it severs the TCP connection.
 - **Upstream Refund Guard**: If an upstream connection fails or returns an error response, the pre-flight prompt cost is automatically refunded to the user's spend ledger.
-- **Connection Abortion**: Monitors downstream client sockets. If a client terminates a request early, Kilovolt instantly drops the upstream Reqwest socket, canceling downstream transmission and preventing ghost token costs.
-- **Dynamic Configuration**: Supports `.env` loading and system environment variable overrides for quick configuration of listening port and default budgets.
-
----
+- **Connection Abortion**: Monitors downstream client sockets. If a client terminates a request early, Kilovolt instantly drops the upstream socket, canceling downstream transmission and preventing "ghost token" billing.
+- **Native Telemetry Dashboard:** Includes a zero-dependency HTML/Tailwind dashboard served on `/dashboard` to visualize active agents, memory footprint, and transaction costs in real-time.
 
 ## 🔌 Supported Providers & LLM Engines
 
-Kilovolt acts as a zero-copy byte pipeline, meaning it streams payloads and tokens without parsing the main chat JSON structure. This makes it natively compatible with **any hosted provider or local engine using the standard OpenAI-compatible wire format (`/v1/chat/completions`)**:
+Kilovolt acts as a zero-copy byte pipeline, streaming payloads without parsing the main chat JSON structure. This makes it natively compatible with **any hosted provider or local engine using the standard OpenAI-compatible wire format (`/v1/chat/completions`)**:
 
 ### Hosted Cloud Providers
+
 - **OpenAI** (Official APIs — Default upstream destination)
 - **DeepSeek** (100% OpenAI-compatible endpoints)
 - **Groq** / **Together AI** / **OpenRouter** / **Fireworks AI**
 
 ### Self-Hosted / Local LLM Engines
+
 - **Ollama** (exposes OpenAI compatible endpoint on port `11434`)
 - **vLLM** / **llama.cpp** (built-in server)
 - **LM Studio** / **LocalAI**
 
----
-
-## 🛠️ Configuration Parameters
-
-Kilovolt is configured using environment variables or a `.env` file in the working directory:
-
-| Variable | Default Value | Description |
-| :--- | :--- | :--- |
-| `KILOVOLT_PORT` | `8080` | The local port the proxy server binds to (e.g. `8080`). |
-| `KILOVOLT_DEFAULT_BUDGET` | `1.00` | The maximum aggregate dollar spend allowed per user (e.g., `1.00` is $1.00 USD). |
-| `BIND_ADDR` / `HOST` | `0.0.0.0` | The network interface address the server binds to. Use `0.0.0.0` to accept external traffic in Docker, or `127.0.0.1` for local-only traffic. |
-| `RUST_LOG` | `kilovolt=info` | Observability and debug logging levels. |
-
----
-
 ## 📦 Quickstart (Under 60 Seconds)
 
-Deploy the Bankruptcy Shield gateway instantly with zero local dependencies:
+Deploy the Bankruptcy Shield gateway instantly with zero local dependencies.
 
 ### 1. Configure Settings
-Create a `.env` file in your project directory:
-```env
+
+Create a `.env` file in your project directory.
+
+```
 KILOVOLT_PORT=8080
 KILOVOLT_DEFAULT_BUDGET=5.00
 RUST_LOG=kilovolt=info
 ```
 
 ### 2. Launch the Gateway
-Expose the proxy and mount your configuration using Docker:
-```bash
-docker run -d --env-file .env -p 8080:8080 yodsarun/kilovolt-proxy:latest
+
+Expose the proxy and mount your configuration using Docker.
+
+```
+docker run -d --env-file .env -p 8080:8080 yodsarun/kilovolt-proxy:v1.2.0
 ```
 
----
+## 🔌 API Integration (Drop-In Replacement)
 
-## 🔌 API Integration
+To route traffic through the Bankruptcy Shield, simply redirect your client library's base URL to Kilovolt and append the custom identity header `X-User-ID`. **No code rewrites required.**
 
-To route traffic through the Bankruptcy Shield, simply redirect your client library's base URL to Kilovolt and append the custom identity header `X-User-ID`.
+### Python (OpenAI SDK)
 
-### 1. Curl (Streaming Request)
-Use the `-N` flag to disable curl's output buffering, enabling you to inspect the token stream in real-time:
-```bash
-curl -i -N -X POST http://127.0.0.1:8080/v1/chat/completions \
-  -H "Authorization: Bearer YOUR_OPENAI_API_KEY" \
-  -H "Content-Type: application/json" \
-  -H "X-User-ID: developer_1" \
-  -d '{
-    "model": "gpt-4o",
-    "messages": [{"role": "user", "content": "Hello!"}],
-    "stream": true
-  }'
 ```
-
-- If `developer_1` exceeds the budget limit set by `KILOVOLT_DEFAULT_BUDGET`, Kilovolt immediately short-circuits the connection with a standard OpenAI-compatible `429 Too Many Requests` error:
-  ```json
-  {
-    "error": {
-      "message": "Budget Exceeded",
-      "type": "requests",
-      "param": null,
-      "code": "budget_exceeded"
-    }
-  }
-  ```
-
-### 2. Python (OpenAI SDK)
-Initialize the standard `openai` library client pointing to the Kilovolt proxy server and pass the tracking identity in `extra_headers`:
-```python
 import os
 from openai import OpenAI
 
 client = OpenAI(
     api_key=os.environ.get("OPENAI_API_KEY", "your-api-key"),
-    base_url="http://127.0.0.1:8080/v1"
+    base_url="http://127.0.0.1:8080/v1" # Point to local Kilovolt instance
 )
 
 try:
@@ -124,7 +86,7 @@ try:
         model="gpt-4o",
         messages=[{"role": "user", "content": "Explain async streams."}],
         stream=True,
-        extra_headers={"X-User-ID": "developer_1"}
+        extra_headers={"X-User-ID": "developer_1"} # Track spend against this ID
     )
     for chunk in response:
         content = chunk.choices[0].delta.content
@@ -134,14 +96,14 @@ except Exception as e:
     print(f"\nAPI Error: {e}")
 ```
 
-### 3. Node.js (OpenAI SDK)
-To integrate Kilovolt in JavaScript/TypeScript backends:
-```javascript
+### Node.js (OpenAI SDK)
+
+```
 const { OpenAI } = require('openai');
 
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY || 'your-api-key',
-  baseURL: 'http://127.0.0.1:8080/v1',
+  baseURL: 'http://127.0.0.1:8080/v1', // Point to local Kilovolt instance
 });
 
 async function main() {
@@ -151,7 +113,7 @@ async function main() {
       messages: [{ role: 'user', content: 'What is zero-copy stream piping?' }],
       stream: true,
     }, {
-      headers: { 'X-User-ID': 'developer_1' }
+      headers: { 'X-User-ID': 'developer_1' } // Track spend against this ID
     });
 
     for await (const chunk of stream) {
@@ -164,14 +126,11 @@ async function main() {
 main();
 ```
 
----
-
 ## 🗺️ Future Roadmap
 
+- **Phase 3 Protocol Expansion:** Adding native support for Anthropic Claude and Google Gemini wire formats.
 - **Automated CI/CD Pipeline**: Transitioning from manual Docker Hub releases to a zero-touch GitHub Actions architecture.
-- **Dynamic Pricing Expansion**: Scaling the internal ledger matrix to support additional upstream LLM providers (Anthropic, Gemini).
-
----
 
 ## 📄 License
+
 This project is licensed under the MIT License - see the LICENSE file for details.
