@@ -233,6 +233,12 @@ const DASHBOARD_HTML: &str = r#"<!DOCTYPE html>
             return `${h}h ${m}m ${s}s`;
         }
 
+        function formatCost(val) {
+            if (val === 0) return '$0.00';
+            if (val < 0.0001) return `$${val.toFixed(7)}`;
+            return `$${val.toFixed(5)}`;
+        }
+
         async function fetchStats() {
             try {
                 const response = await fetch('/api/stats');
@@ -246,7 +252,7 @@ const DASHBOARD_HTML: &str = r#"<!DOCTYPE html>
 
                 // Budget Pipeline Updates
                 document.getElementById('total-tokens').innerText = data.budget.total_tokens_consumed.toLocaleString();
-                document.getElementById('default-budget').innerText = `$${data.budget.default_budget_usd.toFixed(4)}`;
+                document.getElementById('default-budget').innerText = formatCost(data.budget.default_budget_usd);
 
                 // Render ledger
                 const ledgerList = document.getElementById('ledger-list');
@@ -261,7 +267,7 @@ const DASHBOARD_HTML: &str = r#"<!DOCTYPE html>
                         ledgerList.innerHTML += `
                             <div class="flex justify-between items-center bg-slate-950/80 px-3 py-1 rounded border border-slate-800/40">
                                 <span class="font-medium text-slate-400">${user}</span>
-                                <span class="${statusClass}">$${spend.toFixed(5)}</span>
+                                <span class="${statusClass}">${formatCost(spend)}</span>
                             </div>
                         `;
                     });
@@ -284,13 +290,14 @@ const DASHBOARD_HTML: &str = r#"<!DOCTYPE html>
                                 <td class="py-3 px-4 font-bold text-slate-300">${req.user_id}</td>
                                 <td class="py-3 px-4 text-slate-400">${req.model}</td>
                                 <td class="py-3 px-4 text-right text-slate-300">${req.tokens.toLocaleString()}</td>
-                                <td class="py-3 px-4 text-right text-emerald-400 font-semibold">$${req.cost.toFixed(5)}</td>
+                                <td class="py-3 px-4 text-right text-emerald-400 font-semibold">${formatCost(req.cost)}</td>
                                 <td class="py-3 px-4"><span class="px-2 py-0.5 rounded text-xs font-bold ${statusClass} bg-slate-950 border border-slate-800">${req.status}</span></td>
                                 <td class="py-3 px-4 text-right text-amber-500 font-semibold">${req.duration_ms} ms</td>
                             </tr>
                         `;
                     });
                 }
+
 
                 // Status Dot indicator
                 document.getElementById('status-dot').className = 'h-2.5 w-2.5 rounded-full bg-green-500 animate-pulse';
