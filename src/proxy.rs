@@ -223,6 +223,8 @@ pub async fn chat_completions_proxy(
         }
     };
 
+    let is_gemini = request.model.starts_with("gemini-");
+
     // 6. Pre-flight budget & BPE token count evaluation
     let tiktoken_messages: Vec<ChatCompletionRequestMessage> = request
         .messages
@@ -315,20 +317,74 @@ pub async fn chat_completions_proxy(
         }
     };
 
+    // Extract raw API Key for downstream delivery
+    let api_key = auth_val.to_str().unwrap_or("").trim_start_matches("Bearer ").to_string();
+
     // 7. Conditional routing: Route to local mock if X-Mock-Upstream header is present
     let upstream_url = if headers.contains_key("x-mock-upstream") {
         info!("Routing to local mock upstream endpoint");
         format!("http://127.0.0.1:{}/mock/v1/chat/completions", state.port)
+    } else if is_gemini {
+        // Route to Gemini native API
+        format!(
+            "https://generativelanguage.googleapis.com/v1beta/models/{}:streamGenerateContent?alt=sse",
+            request.model
+        )
     } else {
         "https://api.openai.com/v1/chat/completions".to_string()
     };
 
-    // 8. Prepare Upstream Request. We forward the exact body bytes.
-    let upstream_req = state.client
-        .post(&upstream_url)
-        .header(reqwest::header::AUTHORIZATION, auth_val)
-        .header(reqwest::header::CONTENT_TYPE, content_type_val)
-        .body(body_bytes.clone());
+    // 8. Prepare Upstream Request. We format payload according to provider targets.
+    let mut upstream_req = state.client.post(&upstream_url);
+
+    if is_gemini && !headers.contains_key("x-mock-upstream") {
+        // Gemini Native SSE parameters & body mapping
+        upstream_req = upstream_req
+            .header("x-goog-api-key", &api_key)
+            .header(reqwest::header::CONTENT_TYPE, "application/json");
+
+        #[derive(serde::Serialize)]
+        struct GeminiRequest {
+            contents: Vec<GeminiContent>,
+        }
+        #[derive(serde::Serialize)]
+        struct GeminiContent {
+            role: String,
+            parts: Vec<GeminiPart>,
+        }
+        #[derive(serde::Serialize)]
+        struct GeminiPart {
+            text: String,
+        }
+
+        let gemini_contents: Vec<GeminiContent> = request.messages.iter().map(|msg| {
+            let role = match msg.role.as_str() {
+                "assistant" => "model",
+                r => r,
+            }.to_string();
+
+            let content_str = match &msg.content {
+                Some(serde_json::Value::String(s)) => s.clone(),
+                Some(val) => val.to_string(),
+                None => "".to_string(),
+            };
+
+            GeminiContent {
+                role,
+                parts: vec![GeminiPart { text: content_str }],
+            }
+        }).collect();
+
+        let gemini_req = GeminiRequest { contents: gemini_contents };
+        let gemini_body = serde_json::to_vec(&gemini_req).unwrap();
+        upstream_req = upstream_req.body(gemini_body);
+    } else {
+        // Standard OpenAI layout
+        upstream_req = upstream_req
+            .header(reqwest::header::AUTHORIZATION, auth_val)
+            .header(reqwest::header::CONTENT_TYPE, content_type_val)
+            .body(body_bytes.clone());
+    }
 
     info!("Initiating handshake with upstream provider at {}...", upstream_url);
     let upstream_res = match upstream_req.send().await {
@@ -419,6 +475,7 @@ pub async fn chat_completions_proxy(
         total_spend,
         state.default_budget,
         state.clone(), // Pass state to enable stats updates on close/cancel
+        is_gemini,
     );
 
     // Map the stream back to axum::Error to build the Axum response Body
