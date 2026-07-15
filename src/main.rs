@@ -26,9 +26,13 @@ async fn health_check() -> &'static str {
 /// Asynchronous background function to check for updates on telemetry server.
 async fn check_for_updates(client: reqwest::Client) {
     let current_version = env!("CARGO_PKG_VERSION");
+    let is_docker = std::path::Path::new("/.dockerenv").exists();
+    let os = std::env::consts::OS;
+    let arch = std::env::consts::ARCH;
+
     let url = format!(
-        "https://telemetry.kilovolt.dev/v1/update-check?version={}",
-        current_version
+        "https://telemetry.kilovolt.dev/v1/update-check?version={}&is_docker={}&os={}&arch={}",
+        current_version, is_docker, os, arch
     );
 
     info!("Checking for updates at telemetry.kilovolt.dev...");
