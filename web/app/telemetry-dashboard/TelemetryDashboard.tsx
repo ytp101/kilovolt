@@ -12,6 +12,7 @@ interface TelemetryLog {
     os?: string;
     arch?: string;
     ip: string;
+    cost?: number;
     total_requests?: number;
     total_tokens?: number;
     total_users?: number;
@@ -256,7 +257,6 @@ export default function TelemetryDashboard({
                             <thead>
                                 <tr className="text-slate-500 text-left font-medium">
                                     <th className="py-3 px-4">Timestamp</th>
-                                    <th className="py-3 px-4">Client IP</th>
                                     <th className="py-3 px-4">Type</th>
                                     <th className="py-3 px-4">Client ID</th>
                                     <th className="py-3 px-4">Details / Metrics</th>
@@ -265,7 +265,7 @@ export default function TelemetryDashboard({
                             <tbody className="divide-y divide-slate-900/40 font-mono text-slate-300">
                                 {logs.length === 0 ? (
                                     <tr>
-                                        <td colSpan={5} className="py-6 text-center text-slate-500 italic">
+                                        <td colSpan={4} className="py-6 text-center text-slate-500 italic">
                                             No telemetry checks transited yet.
                                         </td>
                                     </tr>
@@ -279,7 +279,15 @@ export default function TelemetryDashboard({
                                             const env = log.isDocker ? 'Docker' : 'Host';
                                             details = `Startup: Env: ${env} | OS: ${log.os} | Arch: ${log.arch} | Version: v${log.version}`;
                                         } else if (log.type === 'daily_mapd') {
-                                            details = `24h Ping: Reqs: ${log.total_requests} | Tokens: ${log.total_tokens} | Users: ${log.total_users}`;
+                                            let modelsStr = '';
+                                            if (log.model_distribution && Object.keys(log.model_distribution).length > 0) {
+                                                modelsStr = ' | Models: ' + Object.entries(log.model_distribution)
+                                                    .map(([model, count]) => `${model} (${count})`)
+                                                    .join(', ');
+                                            }
+                                            details = `24h Ping: Reqs: ${log.total_requests?.toLocaleString()} | Tokens: ${log.total_tokens?.toLocaleString()} | Active Keys: ${log.total_users}${modelsStr}`;
+                                        } else if (log.type === 'tsum_update') {
+                                            details = `TSUM Cost Route: ${formatCost(log.cost || 0)}`;
                                         } else {
                                             details = `Check-in: Version: v${log.version}`;
                                         }
@@ -289,7 +297,6 @@ export default function TelemetryDashboard({
                                                 <td className="py-3 px-4 text-slate-500 text-xs">
                                                     {new Date(log.timestamp).toLocaleString()}
                                                 </td>
-                                                <td className="py-3 px-4 text-slate-400">{log.ip}</td>
                                                 <td className="py-3 px-4">
                                                     <span className={`px-2 py-0.5 rounded text-xs font-bold ${
                                                         log.type === 'startup' 
@@ -304,7 +311,7 @@ export default function TelemetryDashboard({
                                                 <td className="py-3 px-4 text-slate-400 text-xs" title={log.client_hash}>
                                                     {shortHash}
                                                 </td>
-                                                <td className="py-3 px-4 text-slate-300 text-xs truncate max-w-xs" title={details}>
+                                                <td className="py-3 px-4 text-slate-300 text-xs w-2/3 whitespace-pre-wrap break-words" title={details}>
                                                     {details}
                                                 </td>
                                             </tr>

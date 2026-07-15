@@ -56,6 +56,7 @@ export default async function Page() {
                 os: l.os,
                 arch: l.arch,
                 ip: l.ip,
+                cost: l.cost,
                 total_requests: l.total_requests,
                 total_tokens: l.total_tokens,
                 total_users: l.total_users,
