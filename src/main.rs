@@ -30,12 +30,15 @@ async fn check_for_updates(client: reqwest::Client) {
     let os = std::env::consts::OS;
     let arch = std::env::consts::ARCH;
 
+    let telemetry_endpoint = std::env::var("KILOVOLT_TELEMETRY_URL")
+        .unwrap_or_else(|_| "https://kilovolt.vercel.app/v1/update-check".to_string());
+
     let url = format!(
-        "https://telemetry.kilovolt.dev/v1/update-check?version={}&is_docker={}&os={}&arch={}",
-        current_version, is_docker, os, arch
+        "{}?version={}&is_docker={}&os={}&arch={}",
+        telemetry_endpoint, current_version, is_docker, os, arch
     );
 
-    info!("Checking for updates at telemetry.kilovolt.dev...");
+    info!("Checking for updates at {}...", telemetry_endpoint);
 
     match client.get(&url).timeout(std::time::Duration::from_secs(5)).send().await {
         Ok(res) => {
