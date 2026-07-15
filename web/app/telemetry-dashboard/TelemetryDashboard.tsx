@@ -71,14 +71,16 @@ export default function TelemetryDashboard({
         router.refresh();
     };
 
-    // Calculate distributions from Logs
+    // Calculate distributions from Logs (filtering out pure cost pings like tsum_update)
     const totalHandshakes = logs.length;
-    const dockerCount = logs.filter(l => l.isDocker === true || l.isDocker === undefined).length; // Fallback
-    const nativeCount = totalHandshakes - logs.filter(l => l.isDocker === true).length;
+    const metadataLogs = logs.filter(l => l.type === 'startup' || l.type === 'daily_mapd');
+    const totalMetadataLogs = metadataLogs.length;
+    const dockerCount = metadataLogs.filter(l => l.isDocker === true).length;
+    const nativeCount = totalMetadataLogs - dockerCount;
 
     const getDistribution = (key: 'os' | 'arch' | 'version') => {
         const counts: { [key: string]: number } = {};
-        logs.forEach(l => {
+        metadataLogs.forEach(l => {
             const val = l[key] || 'unknown';
             counts[val] = (counts[val] || 0) + 1;
         });
@@ -178,10 +180,10 @@ export default function TelemetryDashboard({
                         <p className="text-xs text-slate-500 font-bold uppercase tracking-wider">Container Environments</p>
                         <div className="flex items-end justify-between mt-2">
                             <p className="text-3xl font-black text-slate-100 font-mono">
-                                {totalHandshakes > 0 ? ((logs.filter(l => l.isDocker === true).length / totalHandshakes) * 100).toFixed(0) : 0}%
+                                {totalMetadataLogs > 0 ? ((metadataLogs.filter(l => l.isDocker === true).length / totalMetadataLogs) * 100).toFixed(0) : 0}%
                             </p>
                             <span className="text-xs text-slate-500 font-mono pb-1">
-                                {logs.filter(l => l.isDocker === true).length} Docker / {logs.filter(l => l.isDocker === false).length} Host
+                                {metadataLogs.filter(l => l.isDocker === true).length} Docker / {metadataLogs.filter(l => l.isDocker === false).length} Host
                             </span>
                         </div>
                     </div>
@@ -199,7 +201,7 @@ export default function TelemetryDashboard({
                                 <p className="text-slate-500 italic text-xs">No records</p>
                             ) : (
                                 osDistribution.map(([os, count]) => {
-                                    const pct = ((count / totalHandshakes) * 100).toFixed(1);
+                                    const pct = totalMetadataLogs > 0 ? ((count / totalMetadataLogs) * 100).toFixed(1) : '0';
                                     return (
                                         <div key={os} className="space-y-1">
                                             <div className="flex justify-between text-slate-200">
@@ -226,7 +228,7 @@ export default function TelemetryDashboard({
                                 <p className="text-slate-500 italic text-xs">No records</p>
                             ) : (
                                 archDistribution.map(([arch, count]) => {
-                                    const pct = ((count / totalHandshakes) * 100).toFixed(1);
+                                    const pct = totalMetadataLogs > 0 ? ((count / totalMetadataLogs) * 100).toFixed(1) : '0';
                                     return (
                                         <div key={arch} className="space-y-1">
                                             <div className="flex justify-between text-slate-200">
