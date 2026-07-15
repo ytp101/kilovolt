@@ -27,13 +27,16 @@ interface TelemetryAnalytics {
 
 export default function TelemetryDashboard({ 
     initialLogs, 
-    initialAnalytics 
+    initialAnalytics,
+    initialStorageType
 }: { 
     initialLogs: TelemetryLog[];
     initialAnalytics: TelemetryAnalytics;
+    initialStorageType: string;
 }) {
     const [logs, setLogs] = useState<TelemetryLog[]>(initialLogs);
     const [analytics, setAnalytics] = useState<TelemetryAnalytics>(initialAnalytics);
+    const [storageType, setStorageType] = useState(initialStorageType);
     const [polling, setPolling] = useState(true);
     const router = useRouter();
 
@@ -48,6 +51,7 @@ export default function TelemetryDashboard({
                 const data = await res.json();
                 setLogs(data.logs);
                 setAnalytics(data.analytics);
+                setStorageType(data.storage_type);
             }
         } catch (e) {
             console.error('Failed to poll telemetry logs:', e);
@@ -118,6 +122,9 @@ export default function TelemetryDashboard({
                             <span className={`h-1.5 w-1.5 rounded-full ${polling ? 'bg-green-400 animate-pulse' : 'bg-slate-400'}`}></span>
                             <span>{polling ? 'Live Polling: 5s' : 'Polling Off'}</span>
                         </button>
+                        <span className="text-xs bg-slate-900 border border-slate-800 text-slate-400 px-3 py-1.5 rounded-xl font-mono hidden sm:inline-block">
+                            Storage: {storageType}
+                        </span>
                         <button
                             onClick={handleLogout}
                             className="text-xs bg-red-500/10 border border-red-500/20 text-red-400 px-3 py-1.5 rounded-xl hover:bg-red-500/20 transition font-medium"

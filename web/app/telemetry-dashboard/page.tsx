@@ -45,6 +45,8 @@ export default async function Page() {
         // File doesn't exist yet
     }
 
+    const storageType = isVercel ? 'Vercel Serverless /tmp (Ephemeral)' : 'Local Disk (Persistent)';
+
     // 4. Render client component with hydration data
-    return <TelemetryDashboard initialLogs={initialLogs} initialAnalytics={initialAnalytics} />;
+    return <TelemetryDashboard initialLogs={initialLogs} initialAnalytics={initialAnalytics} initialStorageType={storageType} />;
 }

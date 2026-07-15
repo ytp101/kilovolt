@@ -44,5 +44,7 @@ export async function GET() {
         // Return empty analytics if file doesn't exist
     }
 
-    return NextResponse.json({ logs, analytics });
+    const storageType = isVercel ? 'Vercel Serverless /tmp (Ephemeral)' : 'Local Disk (Persistent)';
+
+    return NextResponse.json({ logs, analytics, storage_type: storageType });
 }
