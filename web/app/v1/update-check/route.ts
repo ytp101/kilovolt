@@ -1,8 +1,11 @@
 import { NextResponse } from 'next/server';
 import { promises as fs } from 'fs';
 import path from 'path';
+import { kv } from '@vercel/kv';
 
+const useKV = !!process.env.KV_REST_API_URL;
 const isVercel = process.env.VERCEL === '1';
+
 const logFilePath = isVercel 
     ? path.join('/tmp', 'telemetry_log.json')
     : path.join(process.cwd(), 'telemetry_log.json');
@@ -12,59 +15,87 @@ const analyticsFilePath = isVercel
     : path.join(process.cwd(), 'telemetry_analytics.json');
 
 async function saveTelemetryLog(data: any) {
-    try {
-        let logs: any[] = [];
+    if (useKV) {
         try {
-            const fileData = await fs.readFile(logFilePath, 'utf8');
-            logs = JSON.parse(fileData);
+            await kv.lpush('telemetry_logs', JSON.stringify({
+                timestamp: new Date().toISOString(),
+                ...data
+            }));
+            await kv.ltrim('telemetry_logs', 0, 999);
         } catch (e) {
-            // File does not exist yet
+            console.error('[KV Save Log Error]', e);
         }
-        
-        logs.push({
-            timestamp: new Date().toISOString(),
-            ...data
-        });
+    } else {
+        try {
+            let logs: any[] = [];
+            try {
+                const fileData = await fs.readFile(logFilePath, 'utf8');
+                logs = JSON.parse(fileData);
+            } catch (e) {
+                // File does not exist yet
+            }
+            
+            logs.push({
+                timestamp: new Date().toISOString(),
+                ...data
+            });
 
-        if (logs.length > 1000) {
-            logs = logs.slice(logs.length - 1000);
+            if (logs.length > 1000) {
+                logs = logs.slice(logs.length - 1000);
+            }
+
+            await fs.writeFile(logFilePath, JSON.stringify(logs, null, 2), 'utf8');
+        } catch (err) {
+            console.error('[Local Logger Error]', err);
         }
-
-        await fs.writeFile(logFilePath, JSON.stringify(logs, null, 2), 'utf8');
-    } catch (err) {
-        console.error('[Telemetry Logger Error]', err);
     }
 }
 
 async function updateAnalytics(type: string, data: any) {
-    try {
-        let analytics = {
-            total_spend_under_management: 0.0,
-            total_requests_managed: 0,
-            total_tokens_managed: 0,
-            active_instances: [] as string[]
-        };
+    if (useKV) {
         try {
-            const fileData = await fs.readFile(analyticsFilePath, 'utf8');
-            analytics = JSON.parse(fileData);
+            if (data.client_hash) {
+                await kv.sadd('active_instances', data.client_hash);
+            }
+            if (type === 'tsum_update') {
+                await kv.incrbyfloat('total_spend_under_management', data.cost || 0);
+                await kv.incrby('total_requests_managed', 1);
+            } else if (type === 'daily_mapd') {
+                await kv.incrby('total_tokens_managed', data.total_tokens || 0);
+            }
         } catch (e) {
-            // File does not exist
+            console.error('[KV Analytics Error]', e);
         }
+    } else {
+        try {
+            let analytics = {
+                total_spend_under_management: 0.0,
+                total_requests_managed: 0,
+                total_tokens_managed: 0,
+                active_instances: [] as string[]
+            };
+            try {
+                const fileData = await fs.readFile(analyticsFilePath, 'utf8');
+                analytics = JSON.parse(fileData);
+            } catch (e) {
+                // File does not exist yet
+            }
 
-        if (data.client_hash && !analytics.active_instances.includes(data.client_hash)) {
-            analytics.active_instances.push(data.client_hash);
+            if (data.client_hash && !analytics.active_instances.includes(data.client_hash)) {
+                analytics.active_instances.push(data.client_hash);
+            }
+
+            if (type === 'tsum_update') {
+                analytics.total_spend_under_management += data.cost || 0;
+                analytics.total_requests_managed += 1;
+            } else if (type === 'daily_mapd') {
+                analytics.total_tokens_managed += data.total_tokens || 0;
+            }
+
+            await fs.writeFile(analyticsFilePath, JSON.stringify(analytics, null, 2), 'utf8');
+        } catch (e) {
+            console.error('[Local Analytics Error]', e);
         }
-
-        if (type === 'tsum_update') {
-            analytics.total_spend_under_management += data.cost || 0;
-            analytics.total_requests_managed += 1;
-        } else if (type === 'daily_mapd') {
-            analytics.total_tokens_managed += data.total_tokens || 0;
-        }
-
-        await fs.writeFile(analyticsFilePath, JSON.stringify(analytics, null, 2), 'utf8');
-    } catch (e) {
-        console.error('[Analytics Tracker Error]', e);
     }
 }
 
@@ -122,12 +153,10 @@ export async function POST(request: Request) {
             });
             await updateAnalytics('daily_mapd', { client_hash: clientHash, total_tokens: payload.total_tokens });
         } else if (type === 'tsum_update') {
-            // Log tsum updates directly to aggregate numbers to keep logs clean
             await updateAnalytics('tsum_update', { client_hash: clientHash, cost: payload.cost });
             return NextResponse.json({ success: true });
         }
 
-        // Return standard response for startup / daily updates
         const latestVersion = '1.3.0';
         const currentVersion = payload.version || '0.0.0';
         const updateAvailable = currentVersion !== latestVersion;
