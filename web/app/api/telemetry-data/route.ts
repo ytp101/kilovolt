@@ -2,9 +2,14 @@ import { NextResponse } from 'next/server';
 import { promises as fs } from 'fs';
 import path from 'path';
 import { cookies } from 'next/headers';
-import { kv } from '@vercel/kv';
+import { createClient } from '@supabase/supabase-js';
 
-const useKV = !!process.env.KV_REST_API_URL;
+const supabaseUrl = process.env.SUPABASE_URL || '';
+const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_ANON_KEY || '';
+
+const useSupabase = !!(supabaseUrl && supabaseKey);
+const supabase = useSupabase ? createClient(supabaseUrl, supabaseKey) : null;
+
 const isVercel = process.env.VERCEL === '1';
 
 const logFilePath = isVercel 
@@ -32,16 +37,59 @@ export async function GET() {
         active_instances: [] as string[]
     };
 
-    // 2. Fetch metrics from either KV or local files
-    if (useKV) {
+    // 2. Fetch metrics from either Supabase or local files
+    if (useSupabase && supabase) {
         try {
-            const rawLogs = await kv.lrange('telemetry_logs', 0, -1);
-            logs = rawLogs.map(log => typeof log === 'string' ? JSON.parse(log) : log);
-            
-            const tsum = await kv.get<number>('total_spend_under_management') || 0.0;
-            const reqs = await kv.get<number>('total_requests_managed') || 0;
-            const tokens = await kv.get<number>('total_tokens_managed') || 0;
-            const instances = await kv.smembers('active_instances') || [];
+            // Retrieve last 100 logs
+            const { data: dbLogs } = await supabase
+                .from('telemetry_logs')
+                .select('*')
+                .order('timestamp', { ascending: false })
+                .limit(100);
+
+            logs = (dbLogs || []).map((l: any) => ({
+                timestamp: l.timestamp,
+                type: l.type,
+                client_hash: l.client_hash,
+                version: l.version,
+                isDocker: l.is_docker,
+                os: l.os,
+                arch: l.arch,
+                ip: l.ip,
+                total_requests: l.total_requests,
+                total_tokens: l.total_tokens,
+                total_users: l.total_users,
+                model_distribution: l.model_distribution
+            })).reverse(); // Reverse back to chronological order for stats processing in client
+
+            // Calculate aggregations dynamically
+            // A. TSUM (Sum of cost from tsum_updates)
+            const { data: costData } = await supabase
+                .from('telemetry_logs')
+                .select('cost')
+                .eq('type', 'tsum_update');
+            const tsum = (costData || []).reduce((acc: number, item: any) => acc + (item.cost || 0), 0);
+
+            // B. Total Requests (Count of tsum_updates)
+            const { count: requestsCount } = await supabase
+                .from('telemetry_logs')
+                .select('*', { count: 'exact', head: true })
+                .eq('type', 'tsum_update');
+            const reqs = requestsCount || 0;
+
+            // C. Total Tokens Transited (Sum of total_tokens from daily_mapds)
+            const { data: tokensData } = await supabase
+                .from('telemetry_logs')
+                .select('total_tokens')
+                .eq('type', 'daily_mapd');
+            const tokens = (tokensData || []).reduce((acc: number, item: any) => acc + (item.total_tokens || 0), 0);
+
+            // D. Active Instances (Deduplicated Client Hashes)
+            const { data: instancesData } = await supabase
+                .from('telemetry_logs')
+                .select('client_hash');
+            const instancesSet = new Set((instancesData || []).map((item: any) => item.client_hash).filter(Boolean));
+            const instances = Array.from(instancesSet);
 
             analytics = {
                 total_spend_under_management: tsum,
@@ -50,7 +98,7 @@ export async function GET() {
                 active_instances: instances
             };
         } catch (e) {
-            console.error('[KV Read Error]', e);
+            console.error('[Supabase Query Error]', e);
         }
     } else {
         try {
@@ -68,8 +116,8 @@ export async function GET() {
         }
     }
 
-    const storageType = useKV 
-        ? 'Vercel KV (Persistent Redis)' 
+    const storageType = useSupabase 
+        ? 'Supabase Cloud (Persistent Postgres)' 
         : (isVercel ? 'Vercel Serverless /tmp (Ephemeral)' : 'Local Disk (Persistent)');
 
     return NextResponse.json({ logs, analytics, storage_type: storageType });

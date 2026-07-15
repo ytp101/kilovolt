@@ -1,9 +1,14 @@
 import { NextResponse } from 'next/server';
 import { promises as fs } from 'fs';
 import path from 'path';
-import { kv } from '@vercel/kv';
+import { createClient } from '@supabase/supabase-js';
 
-const useKV = !!process.env.KV_REST_API_URL;
+const supabaseUrl = process.env.SUPABASE_URL || '';
+const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_ANON_KEY || '';
+
+const useSupabase = !!(supabaseUrl && supabaseKey);
+const supabase = useSupabase ? createClient(supabaseUrl, supabaseKey) : null;
+
 const isVercel = process.env.VERCEL === '1';
 
 const logFilePath = isVercel 
@@ -15,26 +20,34 @@ const analyticsFilePath = isVercel
     : path.join(process.cwd(), 'telemetry_analytics.json');
 
 async function saveTelemetryLog(data: any) {
-    if (useKV) {
+    if (useSupabase && supabase) {
         try {
-            await kv.lpush('telemetry_logs', JSON.stringify({
-                timestamp: new Date().toISOString(),
-                ...data
-            }));
-            await kv.ltrim('telemetry_logs', 0, 999);
+            await supabase.from('telemetry_logs').insert({
+                type: data.type,
+                client_hash: data.client_hash || null,
+                version: data.version || null,
+                is_docker: data.is_docker !== undefined ? data.is_docker : null,
+                os: data.os || null,
+                arch: data.arch || null,
+                ip: data.ip || 'incognito',
+                cost: data.cost !== undefined ? data.cost : null,
+                total_requests: data.total_requests !== undefined ? data.total_requests : null,
+                total_tokens: data.total_tokens !== undefined ? data.total_tokens : null,
+                total_users: data.total_users !== undefined ? data.total_users : null,
+                model_distribution: data.model_distribution || null
+            });
         } catch (e) {
-            console.error('[KV Save Log Error]', e);
+            console.error('[Supabase Save Log Error]', e);
         }
     } else {
         try {
+            // Local file logger fallback
             let logs: any[] = [];
             try {
                 const fileData = await fs.readFile(logFilePath, 'utf8');
                 logs = JSON.parse(fileData);
-            } catch (e) {
-                // File does not exist yet
-            }
-            
+            } catch (e) {}
+
             logs.push({
                 timestamp: new Date().toISOString(),
                 ...data
@@ -51,51 +64,38 @@ async function saveTelemetryLog(data: any) {
     }
 }
 
-async function updateAnalytics(type: string, data: any) {
-    if (useKV) {
+async function updateAnalyticsFallback(type: string, data: any) {
+    if (useSupabase) {
+        // SQL aggregates will compute analytics on the fly, no need to update secondary tables
+        return;
+    }
+
+    try {
+        let analytics = {
+            total_spend_under_management: 0.0,
+            total_requests_managed: 0,
+            total_tokens_managed: 0,
+            active_instances: [] as string[]
+        };
         try {
-            if (data.client_hash) {
-                await kv.sadd('active_instances', data.client_hash);
-            }
-            if (type === 'tsum_update') {
-                await kv.incrbyfloat('total_spend_under_management', data.cost || 0);
-                await kv.incrby('total_requests_managed', 1);
-            } else if (type === 'daily_mapd') {
-                await kv.incrby('total_tokens_managed', data.total_tokens || 0);
-            }
-        } catch (e) {
-            console.error('[KV Analytics Error]', e);
+            const fileData = await fs.readFile(analyticsFilePath, 'utf8');
+            analytics = JSON.parse(fileData);
+        } catch (e) {}
+
+        if (data.client_hash && !analytics.active_instances.includes(data.client_hash)) {
+            analytics.active_instances.push(data.client_hash);
         }
-    } else {
-        try {
-            let analytics = {
-                total_spend_under_management: 0.0,
-                total_requests_managed: 0,
-                total_tokens_managed: 0,
-                active_instances: [] as string[]
-            };
-            try {
-                const fileData = await fs.readFile(analyticsFilePath, 'utf8');
-                analytics = JSON.parse(fileData);
-            } catch (e) {
-                // File does not exist yet
-            }
 
-            if (data.client_hash && !analytics.active_instances.includes(data.client_hash)) {
-                analytics.active_instances.push(data.client_hash);
-            }
-
-            if (type === 'tsum_update') {
-                analytics.total_spend_under_management += data.cost || 0;
-                analytics.total_requests_managed += 1;
-            } else if (type === 'daily_mapd') {
-                analytics.total_tokens_managed += data.total_tokens || 0;
-            }
-
-            await fs.writeFile(analyticsFilePath, JSON.stringify(analytics, null, 2), 'utf8');
-        } catch (e) {
-            console.error('[Local Analytics Error]', e);
+        if (type === 'tsum_update') {
+            analytics.total_spend_under_management += data.cost || 0;
+            analytics.total_requests_managed += 1;
+        } else if (type === 'daily_mapd') {
+            analytics.total_tokens_managed += data.total_tokens || 0;
         }
+
+        await fs.writeFile(analyticsFilePath, JSON.stringify(analytics, null, 2), 'utf8');
+    } catch (e) {
+        console.error('[Local Analytics Error]', e);
     }
 }
 
@@ -128,18 +128,18 @@ export async function POST(request: Request) {
         const clientHash = payload.client_hash || 'unknown';
         const ip = "incognito";
 
-        // 1. Process and save log entries based on types
+        // Process and save log entries based on types
         if (type === 'startup') {
             await saveTelemetryLog({
                 type: 'startup',
                 client_hash: clientHash,
                 version: payload.version || '0.0.0',
-                isDocker: payload.is_docker === true,
+                is_docker: payload.is_docker === true,
                 os: payload.os || 'unknown',
                 arch: payload.arch || 'unknown',
                 ip
             });
-            await updateAnalytics('startup', { client_hash: clientHash });
+            await updateAnalyticsFallback('startup', { client_hash: clientHash });
         } else if (type === 'daily_mapd') {
             await saveTelemetryLog({
                 type: 'daily_mapd',
@@ -151,9 +151,15 @@ export async function POST(request: Request) {
                 model_distribution: payload.model_distribution || {},
                 ip
             });
-            await updateAnalytics('daily_mapd', { client_hash: clientHash, total_tokens: payload.total_tokens });
+            await updateAnalyticsFallback('daily_mapd', { client_hash: clientHash, total_tokens: payload.total_tokens });
         } else if (type === 'tsum_update') {
-            await updateAnalytics('tsum_update', { client_hash: clientHash, cost: payload.cost });
+            await saveTelemetryLog({
+                type: 'tsum_update',
+                client_hash: clientHash,
+                cost: payload.cost || 0,
+                ip
+            });
+            await updateAnalyticsFallback('tsum_update', { client_hash: clientHash, cost: payload.cost });
             return NextResponse.json({ success: true });
         }
 

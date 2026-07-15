@@ -3,9 +3,14 @@ import { redirect } from 'next/navigation';
 import { promises as fs } from 'fs';
 import path from 'path';
 import TelemetryDashboard from './TelemetryDashboard';
-import { kv } from '@vercel/kv';
+import { createClient } from '@supabase/supabase-js';
 
-const useKV = !!process.env.KV_REST_API_URL;
+const supabaseUrl = process.env.SUPABASE_URL || '';
+const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_ANON_KEY || '';
+
+const useSupabase = !!(supabaseUrl && supabaseKey);
+const supabase = useSupabase ? createClient(supabaseUrl, supabaseKey) : null;
+
 const isVercel = process.env.VERCEL === '1';
 
 const logFilePath = isVercel 
@@ -33,16 +38,53 @@ export default async function Page() {
         active_instances: [] as string[]
     };
 
-    // 2. Fetch metrics from either KV or local files at startup
-    if (useKV) {
+    // 2. Fetch metrics from either Supabase or local files at startup
+    if (useSupabase && supabase) {
         try {
-            const rawLogs = await kv.lrange('telemetry_logs', 0, -1);
-            initialLogs = rawLogs.map(log => typeof log === 'string' ? JSON.parse(log) : log);
-            
-            const tsum = await kv.get<number>('total_spend_under_management') || 0.0;
-            const reqs = await kv.get<number>('total_requests_managed') || 0;
-            const tokens = await kv.get<number>('total_tokens_managed') || 0;
-            const instances = await kv.smembers('active_instances') || [];
+            const { data: dbLogs } = await supabase
+                .from('telemetry_logs')
+                .select('*')
+                .order('timestamp', { ascending: false })
+                .limit(100);
+
+            initialLogs = (dbLogs || []).map((l: any) => ({
+                timestamp: l.timestamp,
+                type: l.type,
+                client_hash: l.client_hash,
+                version: l.version,
+                isDocker: l.is_docker,
+                os: l.os,
+                arch: l.arch,
+                ip: l.ip,
+                total_requests: l.total_requests,
+                total_tokens: l.total_tokens,
+                total_users: l.total_users,
+                model_distribution: l.model_distribution
+            })).reverse();
+
+            const { data: costData } = await supabase
+                .from('telemetry_logs')
+                .select('cost')
+                .eq('type', 'tsum_update');
+            const tsum = (costData || []).reduce((acc: number, item: any) => acc + (item.cost || 0), 0);
+
+            const { count: requestsCount } = await supabase
+                .from('telemetry_logs')
+                .select('*', { count: 'exact', head: true })
+                .eq('type', 'tsum_update');
+            const reqs = requestsCount || 0;
+
+            const { data: tokensData } = await supabase
+                .from('telemetry_logs')
+                .select('total_tokens')
+                .eq('type', 'daily_mapd');
+            const tokens = (tokensData || []).reduce((acc: number, item: any) => acc + (item.total_tokens || 0), 0);
+
+            const { data: instancesData } = await supabase
+                .from('telemetry_logs')
+                .select('client_hash');
+            const instancesSet = new Set((instancesData || []).map((item: any) => item.client_hash).filter(Boolean));
+            const instances = Array.from(instancesSet);
 
             initialAnalytics = {
                 total_spend_under_management: tsum,
@@ -51,7 +93,7 @@ export default async function Page() {
                 active_instances: instances
             };
         } catch (e) {
-            console.error('[KV Server Render Error]', e);
+            console.error('[Supabase Server Render Error]', e);
         }
     } else {
         try {
@@ -69,8 +111,8 @@ export default async function Page() {
         }
     }
 
-    const storageType = useKV 
-        ? 'Vercel KV (Persistent Redis)' 
+    const storageType = useSupabase 
+        ? 'Supabase Cloud (Persistent Postgres)' 
         : (isVercel ? 'Vercel Serverless /tmp (Ephemeral)' : 'Local Disk (Persistent)');
 
     // 3. Render client component with hydration data
