@@ -39,3 +39,7 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# local telemetry logs database
+telemetry_log.json
+telemetry_analytics.json

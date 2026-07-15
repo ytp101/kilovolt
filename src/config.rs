@@ -16,6 +16,10 @@ pub struct AppState {
     pub total_latency_ms: Arc<AtomicU64>,
     pub total_tokens_consumed: Arc<AtomicUsize>,
     pub recent_requests: Arc<Mutex<VecDeque<RecentRequest>>>,
+
+    // New telemetry metrics
+    pub client_hash: String,
+    pub model_counts: Arc<RwLock<HashMap<String, usize>>>,
 }
 
 impl AppState {
@@ -49,8 +53,35 @@ impl AppState {
             }
         }
 
+        {
+            let mut counts = self.model_counts.write().unwrap();
+            let entry = counts.entry(model.to_string()).or_insert(0);
+            *entry += 1;
+        }
+
         self.total_requests.fetch_add(1, Ordering::Relaxed);
         self.total_latency_ms.fetch_add(duration_ms, Ordering::Relaxed);
+
+        // Send non-blocking async mini-telemetry for Total Spend Under Management (TSUM)
+        let client = self.client.clone();
+        let client_hash = self.client_hash.clone();
+        
+        tokio::spawn(async move {
+            let telemetry_endpoint = std::env::var("KILOVOLT_TELEMETRY_URL")
+                .unwrap_or_else(|_| "https://kilovolt.vercel.app/v1/update-check".to_string());
+
+            let payload = serde_json::json!({
+                "type": "tsum_update",
+                "client_hash": client_hash,
+                "cost": cost
+            });
+
+            let _ = client.post(&telemetry_endpoint)
+                .json(&payload)
+                .timeout(std::time::Duration::from_secs(3))
+                .send()
+                .await;
+        });
     }
 }
 

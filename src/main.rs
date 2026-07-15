@@ -9,10 +9,11 @@ use axum::{
 };
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex, RwLock};
-use std::sync::atomic::{AtomicU64, AtomicUsize};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::Instant;
 use tracing::{error, info};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+use sha2::{Sha256, Digest};
 
 use crate::config::AppState;
 use crate::dashboard::{get_dashboard, get_stats};
@@ -23,24 +24,68 @@ async fn health_check() -> &'static str {
     "OK"
 }
 
-/// Asynchronous background function to check for updates on telemetry server.
-async fn check_for_updates(client: reqwest::Client) {
+/// Helper function to retrieve or generate a persistent anonymous client hash.
+fn get_or_create_client_hash() -> String {
+    let local_path = std::path::Path::new(".client_hash");
+    if let Ok(content) = std::fs::read_to_string(local_path) {
+        let trimmed = content.trim();
+        if !trimmed.is_empty() {
+            return trimmed.to_string();
+        }
+    }
+
+    let tmp_path = std::path::Path::new("/tmp/kilovolt_client_hash");
+    if let Ok(content) = std::fs::read_to_string(tmp_path) {
+        let trimmed = content.trim();
+        if !trimmed.is_empty() {
+            return trimmed.to_string();
+        }
+    }
+
+    // Generate a fresh unique SHA-256 hash using a new UUID
+    let new_uuid = uuid::Uuid::new_v4().to_string();
+    let mut hasher = Sha256::new();
+    hasher.update(new_uuid.as_bytes());
+    let new_hash = format!("{:x}", hasher.finalize());
+
+    // Persist hash (ignoring file write errors on read-only docker file systems)
+    let _ = std::fs::write(local_path, &new_hash);
+    let _ = std::fs::write(tmp_path, &new_hash);
+
+    new_hash
+}
+
+/// One-time startup check-in telemetry payload sender.
+async fn send_startup_telemetry(client: reqwest::Client, client_hash: String) {
     let current_version = env!("CARGO_PKG_VERSION");
-    let is_docker = std::path::Path::new("/.dockerenv").exists();
-    let os = std::env::consts::OS;
-    let arch = std::env::consts::ARCH;
+    let os = std::env::consts::OS.to_string();
+    
+    // Normalize CPU architectures
+    let arch = match std::env::consts::ARCH {
+        "x86_64" => "amd64",
+        "aarch64" => "arm64",
+        other => other,
+    }.to_string();
 
     let telemetry_endpoint = std::env::var("KILOVOLT_TELEMETRY_URL")
         .unwrap_or_else(|_| "https://kilovolt.vercel.app/v1/update-check".to_string());
 
-    let url = format!(
-        "{}?version={}&is_docker={}&os={}&arch={}",
-        telemetry_endpoint, current_version, is_docker, os, arch
-    );
+    info!("Sending startup telemetry check-in to {}...", telemetry_endpoint);
 
-    info!("Checking for updates at {}...", telemetry_endpoint);
+    let payload = serde_json::json!({
+        "type": "startup",
+        "client_hash": client_hash,
+        "version": current_version,
+        "os": os,
+        "arch": arch
+    });
 
-    match client.get(&url).timeout(std::time::Duration::from_secs(5)).send().await {
+    match client.post(&telemetry_endpoint)
+        .json(&payload)
+        .timeout(std::time::Duration::from_secs(5))
+        .send()
+        .await
+    {
         Ok(res) => {
             if res.status().is_success() {
                 #[derive(serde::Deserialize)]
@@ -56,20 +101,66 @@ async fn check_for_updates(client: reqwest::Client) {
                             "A new version of Kilovolt is available: {} (current: {})",
                             update.latest_version, current_version
                         );
-                        if let Some(msg) = update.message {
-                            info!("Update message: {}", msg);
-                        }
                     } else {
                         info!("Kilovolt is up to date (version: {})", current_version);
                     }
+                    if let Some(msg) = update.message {
+                        info!("Telemetry response: {}", msg);
+                    }
                 }
             } else {
-                info!("Telemetry update check returned status: {}", res.status());
+                info!("Telemetry startup check-in returned status: {}", res.status());
             }
         }
         Err(e) => {
-            info!("Failed to check for updates (endpoint offline or unreachable): {:?}", e);
+            info!("Failed to complete startup telemetry check-in (endpoint unreachable): {:?}", e);
         }
+    }
+}
+
+/// 24-hour loop for running daily MAPD telemetry reports.
+async fn run_daily_telemetry_loop(state: AppState) {
+    let client = state.client.clone();
+    let client_hash = state.client_hash.clone();
+
+    loop {
+        // Sleep for a full 24-hour cycle
+        tokio::time::sleep(std::time::Duration::from_secs(24 * 60 * 60)).await;
+
+        let current_version = env!("CARGO_PKG_VERSION");
+        let total_requests = state.total_requests.load(Ordering::Relaxed);
+        let total_tokens = state.total_tokens_consumed.load(Ordering::Relaxed);
+
+        let total_users = {
+            let map = state.spend_tracker.read().unwrap();
+            map.len()
+        };
+
+        let model_distribution = {
+            let counts = state.model_counts.read().unwrap();
+            counts.clone()
+        };
+
+        let telemetry_endpoint = std::env::var("KILOVOLT_TELEMETRY_URL")
+            .unwrap_or_else(|_| "https://kilovolt.vercel.app/v1/update-check".to_string());
+
+        info!("Sending 24hr cycle MAPD telemetry check-in to {}...", telemetry_endpoint);
+
+        let payload = serde_json::json!({
+            "type": "daily_mapd",
+            "client_hash": client_hash,
+            "version": current_version,
+            "total_requests": total_requests,
+            "total_tokens": total_tokens,
+            "total_users": total_users,
+            "model_distribution": model_distribution
+        });
+
+        let _ = client.post(&telemetry_endpoint)
+            .json(&payload)
+            .timeout(std::time::Duration::from_secs(5))
+            .send()
+            .await;
     }
 }
 
@@ -141,9 +232,13 @@ async fn main() {
 
     // Initialize global shared in-memory spend tracker state
     let spend_tracker = Arc::new(RwLock::new(HashMap::new()));
+    
+    // Retrieve or create client identity hash
+    let client_hash = get_or_create_client_hash();
+    let model_counts = Arc::new(RwLock::new(HashMap::new()));
 
     let state = AppState {
-        client,
+        client: client.clone(),
         spend_tracker,
         default_budget,
         port,
@@ -152,12 +247,21 @@ async fn main() {
         total_latency_ms: Arc::new(AtomicU64::new(0)),
         total_tokens_consumed: Arc::new(AtomicUsize::new(0)),
         recent_requests: Arc::new(Mutex::new(VecDeque::new())),
+        client_hash: client_hash.clone(),
+        model_counts,
     };
 
-    // Spawn background task to check for updates via the telemetry server
-    let update_client = state.client.clone();
+    // Spawn startup check-in task
+    let startup_client = client.clone();
+    let startup_hash = client_hash.clone();
     tokio::spawn(async move {
-        check_for_updates(update_client).await;
+        send_startup_telemetry(startup_client, startup_hash).await;
+    });
+
+    // Spawn 24h cycle metrics loop
+    let daily_state = state.clone();
+    tokio::spawn(async move {
+        run_daily_telemetry_loop(daily_state).await;
     });
 
     // Build the Axum Router

@@ -5,19 +5,39 @@ import { useRouter } from 'next/navigation';
 
 interface TelemetryLog {
     timestamp: string;
+    type: string;
+    client_hash?: string;
     version: string;
-    isDocker: boolean;
-    os: string;
-    arch: string;
+    isDocker?: boolean;
+    os?: string;
+    arch?: string;
     ip: string;
+    total_requests?: number;
+    total_tokens?: number;
+    total_users?: number;
+    model_distribution?: { [key: string]: number };
 }
 
-export default function TelemetryDashboard({ initialLogs }: { initialLogs: TelemetryLog[] }) {
+interface TelemetryAnalytics {
+    total_spend_under_management: number;
+    total_requests_managed: number;
+    total_tokens_managed: number;
+    active_instances: string[];
+}
+
+export default function TelemetryDashboard({ 
+    initialLogs, 
+    initialAnalytics 
+}: { 
+    initialLogs: TelemetryLog[];
+    initialAnalytics: TelemetryAnalytics;
+}) {
     const [logs, setLogs] = useState<TelemetryLog[]>(initialLogs);
+    const [analytics, setAnalytics] = useState<TelemetryAnalytics>(initialAnalytics);
     const [polling, setPolling] = useState(true);
     const router = useRouter();
 
-    const fetchLogs = async () => {
+    const fetchTelemetry = async () => {
         try {
             const res = await fetch('/api/telemetry-data');
             if (res.status === 401) {
@@ -26,7 +46,8 @@ export default function TelemetryDashboard({ initialLogs }: { initialLogs: Telem
             }
             if (res.ok) {
                 const data = await res.json();
-                setLogs(data);
+                setLogs(data.logs);
+                setAnalytics(data.analytics);
             }
         } catch (e) {
             console.error('Failed to poll telemetry logs:', e);
@@ -35,25 +56,22 @@ export default function TelemetryDashboard({ initialLogs }: { initialLogs: Telem
 
     useEffect(() => {
         if (!polling) return;
-        const interval = setInterval(fetchLogs, 5000);
+        const interval = setInterval(fetchTelemetry, 5000);
         return () => clearInterval(interval);
     }, [polling]);
 
     // Handle logout
     const handleLogout = async () => {
-        // Clear cookie client side by setting past expiry date
         document.cookie = "admin_session=; Path=/; Expires=Thu, 01 Jan 1970 00:00:01 GMT;";
         router.push('/login');
         router.refresh();
     };
 
-    // Calculate Analytics
+    // Calculate distributions from Logs
     const totalHandshakes = logs.length;
-    const dockerCount = logs.filter(l => l.isDocker).length;
-    const nativeCount = totalHandshakes - dockerCount;
-    const dockerPercentage = totalHandshakes > 0 ? ((dockerCount / totalHandshakes) * 100).toFixed(1) : '0';
+    const dockerCount = logs.filter(l => l.isDocker === true || l.isDocker === undefined).length; // Fallback
+    const nativeCount = totalHandshakes - logs.filter(l => l.isDocker === true).length;
 
-    // Grouping helper
     const getDistribution = (key: 'os' | 'arch' | 'version') => {
         const counts: { [key: string]: number } = {};
         logs.forEach(l => {
@@ -67,6 +85,13 @@ export default function TelemetryDashboard({ initialLogs }: { initialLogs: Telem
     const archDistribution = getDistribution('arch');
     const versionDistribution = getDistribution('version');
 
+    // Format TSUM cost helper
+    const formatCost = (val: number) => {
+        if (val === 0) return '$0.00';
+        if (val < 0.001) return `$${val.toFixed(7)}`;
+        return `$${val.toFixed(4)}`;
+    };
+
     return (
         <div className="min-h-screen bg-slate-950 text-slate-100 font-sans pb-20 relative overflow-hidden">
             {/* Background radial glow */}
@@ -78,7 +103,7 @@ export default function TelemetryDashboard({ initialLogs }: { initialLogs: Telem
                     <div className="flex items-center space-x-3">
                         <span className="text-xl">📊</span>
                         <span className="text-lg font-black tracking-wider text-slate-100 uppercase">
-                            Telemetry Analytics
+                            Telemetry Analytics Hub
                         </span>
                     </div>
                     <div className="flex items-center space-x-4">
@@ -107,39 +132,38 @@ export default function TelemetryDashboard({ initialLogs }: { initialLogs: Telem
             <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-10 space-y-10 relative z-10">
                 
                 {/* Stats Summary Grid */}
-                <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-                    {/* Card: Total Handshakes */}
-                    <div className="bg-slate-900/40 border border-slate-900 rounded-2xl p-6 shadow-xl">
-                        <p className="text-xs text-slate-500 font-bold uppercase tracking-wider">Total Update Checks</p>
-                        <p className="text-4xl font-black text-slate-100 mt-2 font-mono">{totalHandshakes}</p>
+                <div className="grid grid-cols-1 md:grid-cols-4 gap-6">
+                    {/* Card: TSUM */}
+                    <div className="bg-slate-900/60 border border-yellow-500/10 rounded-2xl p-6 shadow-xl relative overflow-hidden group hover:border-yellow-500/30 transition duration-300">
+                        <div className="absolute top-0 right-0 w-[100px] h-[100px] bg-yellow-500/5 blur-[30px] rounded-full pointer-events-none" />
+                        <p className="text-xs text-yellow-500 font-bold uppercase tracking-wider">Total Spend Under Management (TSUM)</p>
+                        <p className="text-3xl font-black text-yellow-400 mt-2 font-mono">
+                            {formatCost(analytics.total_spend_under_management)}
+                        </p>
                     </div>
 
-                    {/* Card: Docker Environment Share */}
+                    {/* Card: Total Requests managed */}
                     <div className="bg-slate-900/40 border border-slate-900 rounded-2xl p-6 shadow-xl">
-                        <p className="text-xs text-slate-500 font-bold uppercase tracking-wider">Docker vs. Native</p>
-                        <div className="flex items-end justify-between mt-2">
-                            <p className="text-4xl font-black text-slate-100 font-mono">{dockerPercentage}%</p>
-                            <span className="text-xs text-slate-400 pb-1 font-mono">
-                                {dockerCount} Container / {nativeCount} Native
-                            </span>
-                        </div>
+                        <p className="text-xs text-slate-500 font-bold uppercase tracking-wider">Total Requests Managed</p>
+                        <p className="text-3xl font-black text-slate-100 mt-2 font-mono">
+                            {analytics.total_requests_managed.toLocaleString()}
+                        </p>
                     </div>
 
-                    {/* Card: Version Distribution */}
+                    {/* Card: Total Tokens managed */}
                     <div className="bg-slate-900/40 border border-slate-900 rounded-2xl p-6 shadow-xl">
-                        <p className="text-xs text-slate-500 font-bold uppercase tracking-wider mb-2">Versions</p>
-                        <div className="space-y-1 text-sm max-h-12 overflow-y-auto font-mono">
-                            {versionDistribution.length === 0 ? (
-                                <p className="text-slate-500 italic text-xs">No entries</p>
-                            ) : (
-                                versionDistribution.map(([version, count]) => (
-                                    <div key={version} className="flex justify-between text-slate-300">
-                                        <span>v{version}</span>
-                                        <span className="text-slate-500">{count} pings</span>
-                                    </div>
-                                ))
-                            )}
-                        </div>
+                        <p className="text-xs text-slate-500 font-bold uppercase tracking-wider">Tokens Transited (Aggregated)</p>
+                        <p className="text-3xl font-black text-slate-100 mt-2 font-mono">
+                            {analytics.total_tokens_managed.toLocaleString()}
+                        </p>
+                    </div>
+
+                    {/* Card: Active Instances */}
+                    <div className="bg-slate-900/40 border border-slate-900 rounded-2xl p-6 shadow-xl">
+                        <p className="text-xs text-slate-500 font-bold uppercase tracking-wider">Active Instances</p>
+                        <p className="text-3xl font-black text-slate-100 mt-2 font-mono">
+                            {analytics.active_instances.length}
+                        </p>
                     </div>
                 </div>
 
@@ -172,7 +196,7 @@ export default function TelemetryDashboard({ initialLogs }: { initialLogs: Telem
                         </div>
                     </div>
 
-                    {/* Architecture Share */}
+                    {/* Hardware Architecture */}
                     <div className="bg-slate-900/40 border border-slate-900 rounded-2xl p-6 shadow-xl space-y-4">
                         <h3 className="text-sm font-bold text-slate-400 uppercase tracking-wider border-b border-slate-900 pb-2">
                             Hardware Architecture
@@ -203,7 +227,7 @@ export default function TelemetryDashboard({ initialLogs }: { initialLogs: Telem
                 {/* Handshake Logs Table */}
                 <div className="bg-slate-900/40 border border-slate-900 rounded-2xl p-6 shadow-xl">
                     <h3 className="text-sm font-bold text-slate-400 uppercase tracking-wider mb-4 border-b border-slate-900 pb-2">
-                        Recent Handshake Records (Incognito Logs)
+                        Recent Telemetry Events (Startup & MAPD Handshakes)
                     </h3>
                     <div className="overflow-x-auto">
                         <table className="min-w-full divide-y divide-slate-900 text-sm">
@@ -211,40 +235,58 @@ export default function TelemetryDashboard({ initialLogs }: { initialLogs: Telem
                                 <tr className="text-slate-500 text-left font-medium">
                                     <th className="py-3 px-4">Timestamp</th>
                                     <th className="py-3 px-4">Client IP</th>
-                                    <th className="py-3 px-4">Version</th>
-                                    <th className="py-3 px-4">Docker</th>
-                                    <th className="py-3 px-4">OS</th>
-                                    <th className="py-3 px-4">Architecture</th>
+                                    <th className="py-3 px-4">Type</th>
+                                    <th className="py-3 px-4">Client ID</th>
+                                    <th className="py-3 px-4">Details / Metrics</th>
                                 </tr>
                             </thead>
                             <tbody className="divide-y divide-slate-900/40 font-mono text-slate-300">
                                 {logs.length === 0 ? (
                                     <tr>
-                                        <td colSpan={6} className="py-6 text-center text-slate-500 italic">
-                                            No pings captured yet. Start a Kilovolt engine to trigger.
+                                        <td colSpan={5} className="py-6 text-center text-slate-500 italic">
+                                            No telemetry checks transited yet.
                                         </td>
                                     </tr>
                                 ) : (
-                                    [...logs].reverse().map((log, idx) => (
-                                        <tr key={idx} className="hover:bg-slate-900/20 transition">
-                                            <td className="py-3 px-4 text-slate-500 text-xs">
-                                                {new Date(log.timestamp).toLocaleString()}
-                                            </td>
-                                            <td className="py-3 px-4 text-slate-400">{log.ip}</td>
-                                            <td className="py-3 px-4 font-bold text-slate-200">v{log.version}</td>
-                                            <td className="py-3 px-4">
-                                                <span className={`px-2 py-0.5 rounded text-xs font-bold ${
-                                                    log.isDocker 
-                                                        ? 'text-yellow-400 bg-yellow-500/10 border border-yellow-500/20' 
-                                                        : 'text-slate-500 bg-slate-950 border border-slate-850'
-                                                }`}>
-                                                    {log.isDocker ? 'Docker' : 'Native'}
-                                                </span>
-                                            </td>
-                                            <td className="py-3 px-4 capitalize text-slate-400">{log.os}</td>
-                                            <td className="py-3 px-4 text-slate-400">{log.arch}</td>
-                                        </tr>
-                                    ))
+                                    [...logs].reverse().map((log, idx) => {
+                                        const shortHash = log.client_hash ? `${log.client_hash.slice(0, 8)}...` : 'n/a';
+                                        
+                                        // Dynamic details column based on telemetry type
+                                        let details = '';
+                                        if (log.type === 'startup') {
+                                            details = `Startup: OS: ${log.os} | Arch: ${log.arch} | Version: v${log.version}`;
+                                        } else if (log.type === 'daily_mapd') {
+                                            details = `24h Ping: Reqs: ${log.total_requests} | Tokens: ${log.total_tokens} | Users: ${log.total_users}`;
+                                        } else {
+                                            details = `Check-in: Version: v${log.version}`;
+                                        }
+
+                                        return (
+                                            <tr key={idx} className="hover:bg-slate-900/20 transition">
+                                                <td className="py-3 px-4 text-slate-500 text-xs">
+                                                    {new Date(log.timestamp).toLocaleString()}
+                                                </td>
+                                                <td className="py-3 px-4 text-slate-400">{log.ip}</td>
+                                                <td className="py-3 px-4">
+                                                    <span className={`px-2 py-0.5 rounded text-xs font-bold ${
+                                                        log.type === 'startup' 
+                                                            ? 'text-yellow-400 bg-yellow-500/10 border border-yellow-500/20' 
+                                                            : log.type === 'daily_mapd'
+                                                            ? 'text-emerald-400 bg-emerald-500/10 border border-emerald-500/20'
+                                                            : 'text-slate-400 bg-slate-950 border border-slate-850'
+                                                    }`}>
+                                                        {log.type}
+                                                    </span>
+                                                </td>
+                                                <td className="py-3 px-4 text-slate-400 text-xs" title={log.client_hash}>
+                                                    {shortHash}
+                                                </td>
+                                                <td className="py-3 px-4 text-slate-300 text-xs truncate max-w-xs" title={details}>
+                                                    {details}
+                                                </td>
+                                            </tr>
+                                        );
+                                    })
                                 )}
                             </tbody>
                         </table>

@@ -1,2 +1,3 @@
 /target
 .env
+.client_hash

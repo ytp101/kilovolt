@@ -8,6 +8,10 @@ const logFilePath = isVercel
     ? path.join('/tmp', 'telemetry_log.json')
     : path.join(process.cwd(), 'telemetry_log.json');
 
+const analyticsFilePath = isVercel
+    ? path.join('/tmp', 'telemetry_analytics.json')
+    : path.join(process.cwd(), 'telemetry_analytics.json');
+
 export async function GET() {
     // 1. Session verification
     const cookieStore = await cookies();
@@ -18,12 +22,27 @@ export async function GET() {
     }
 
     // 2. Fetch logs from file
+    let logs: any[] = [];
     try {
         const fileData = await fs.readFile(logFilePath, 'utf8');
-        const logs = JSON.parse(fileData);
-        return NextResponse.json(logs);
+        logs = JSON.parse(fileData);
     } catch (e) {
-        // Return empty array if file does not exist yet
-        return NextResponse.json([]);
+        // Return empty logs if file doesn't exist
     }
+
+    // 3. Fetch analytics from file
+    let analytics = {
+        total_spend_under_management: 0.0,
+        total_requests_managed: 0,
+        total_tokens_managed: 0,
+        active_instances: [] as string[]
+    };
+    try {
+        const fileData = await fs.readFile(analyticsFilePath, 'utf8');
+        analytics = JSON.parse(fileData);
+    } catch (e) {
+        // Return empty analytics if file doesn't exist
+    }
+
+    return NextResponse.json({ logs, analytics });
 }
