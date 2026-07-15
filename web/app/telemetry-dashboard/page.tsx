@@ -4,7 +4,10 @@ import { promises as fs } from 'fs';
 import path from 'path';
 import TelemetryDashboard from './TelemetryDashboard';
 
-const logFilePath = path.join(process.cwd(), 'telemetry_log.json');
+const isVercel = process.env.VERCEL === '1';
+const logFilePath = isVercel 
+    ? path.join('/tmp', 'telemetry_log.json')
+    : path.join(process.cwd(), 'telemetry_log.json');
 
 export default async function Page() {
     // 1. Enforce Server-Side Auth Check

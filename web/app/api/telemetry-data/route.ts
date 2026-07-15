@@ -3,7 +3,10 @@ import { promises as fs } from 'fs';
 import path from 'path';
 import { cookies } from 'next/headers';
 
-const logFilePath = path.join(process.cwd(), 'telemetry_log.json');
+const isVercel = process.env.VERCEL === '1';
+const logFilePath = isVercel 
+    ? path.join('/tmp', 'telemetry_log.json')
+    : path.join(process.cwd(), 'telemetry_log.json');
 
 export async function GET() {
     // 1. Session verification

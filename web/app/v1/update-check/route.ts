@@ -2,7 +2,10 @@ import { NextResponse } from 'next/server';
 import { promises as fs } from 'fs';
 import path from 'path';
 
-const logFilePath = path.join(process.cwd(), 'telemetry_log.json');
+const isVercel = process.env.VERCEL === '1';
+const logFilePath = isVercel 
+    ? path.join('/tmp', 'telemetry_log.json')
+    : path.join(process.cwd(), 'telemetry_log.json');
 
 async function saveTelemetryLog(data: {
     version: string;
