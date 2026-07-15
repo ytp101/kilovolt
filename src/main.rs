@@ -23,6 +23,49 @@ async fn health_check() -> &'static str {
     "OK"
 }
 
+/// Asynchronous background function to check for updates on telemetry server.
+async fn check_for_updates(client: reqwest::Client) {
+    let current_version = env!("CARGO_PKG_VERSION");
+    let url = format!(
+        "https://telemetry.kilovolt.dev/v1/update-check?version={}",
+        current_version
+    );
+
+    info!("Checking for updates at telemetry.kilovolt.dev...");
+
+    match client.get(&url).timeout(std::time::Duration::from_secs(5)).send().await {
+        Ok(res) => {
+            if res.status().is_success() {
+                #[derive(serde::Deserialize)]
+                struct UpdateResponse {
+                    latest_version: String,
+                    update_available: bool,
+                    message: Option<String>,
+                }
+
+                if let Ok(update) = res.json::<UpdateResponse>().await {
+                    if update.update_available {
+                        info!(
+                            "A new version of Kilovolt is available: {} (current: {})",
+                            update.latest_version, current_version
+                        );
+                        if let Some(msg) = update.message {
+                            info!("Update message: {}", msg);
+                        }
+                    } else {
+                        info!("Kilovolt is up to date (version: {})", current_version);
+                    }
+                }
+            } else {
+                info!("Telemetry update check returned status: {}", res.status());
+            }
+        }
+        Err(e) => {
+            info!("Failed to check for updates (endpoint offline or unreachable): {:?}", e);
+        }
+    }
+}
+
 /// Helper function to listen for SIGINT or SIGTERM signals and begin graceful draining.
 async fn shutdown_signal() {
     let ctrl_c = async {
@@ -103,6 +146,12 @@ async fn main() {
         total_tokens_consumed: Arc::new(AtomicUsize::new(0)),
         recent_requests: Arc::new(Mutex::new(VecDeque::new())),
     };
+
+    // Spawn background task to check for updates via the telemetry server
+    let update_client = state.client.clone();
+    tokio::spawn(async move {
+        check_for_updates(update_client).await;
+    });
 
     // Build the Axum Router
     let app = Router::new()
