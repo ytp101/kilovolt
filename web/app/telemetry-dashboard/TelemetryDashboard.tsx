@@ -132,7 +132,7 @@ export default function TelemetryDashboard({
             <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-10 space-y-10 relative z-10">
                 
                 {/* Stats Summary Grid */}
-                <div className="grid grid-cols-1 md:grid-cols-4 gap-6">
+                <div className="grid grid-cols-1 md:grid-cols-5 gap-6">
                     {/* Card: TSUM */}
                     <div className="bg-slate-900/60 border border-yellow-500/10 rounded-2xl p-6 shadow-xl relative overflow-hidden group hover:border-yellow-500/30 transition duration-300">
                         <div className="absolute top-0 right-0 w-[100px] h-[100px] bg-yellow-500/5 blur-[30px] rounded-full pointer-events-none" />
@@ -164,6 +164,19 @@ export default function TelemetryDashboard({
                         <p className="text-3xl font-black text-slate-100 mt-2 font-mono">
                             {analytics.active_instances.length}
                         </p>
+                    </div>
+
+                    {/* Card: Docker vs Native */}
+                    <div className="bg-slate-900/40 border border-slate-900 rounded-2xl p-6 shadow-xl">
+                        <p className="text-xs text-slate-500 font-bold uppercase tracking-wider">Container Environments</p>
+                        <div className="flex items-end justify-between mt-2">
+                            <p className="text-3xl font-black text-slate-100 font-mono">
+                                {totalHandshakes > 0 ? ((logs.filter(l => l.isDocker === true).length / totalHandshakes) * 100).toFixed(0) : 0}%
+                            </p>
+                            <span className="text-xs text-slate-500 font-mono pb-1">
+                                {logs.filter(l => l.isDocker === true).length} Docker / {logs.filter(l => l.isDocker === false).length} Host
+                            </span>
+                        </div>
                     </div>
                 </div>
 
@@ -254,7 +267,8 @@ export default function TelemetryDashboard({
                                         // Dynamic details column based on telemetry type
                                         let details = '';
                                         if (log.type === 'startup') {
-                                            details = `Startup: OS: ${log.os} | Arch: ${log.arch} | Version: v${log.version}`;
+                                            const env = log.isDocker ? 'Docker' : 'Host';
+                                            details = `Startup: Env: ${env} | OS: ${log.os} | Arch: ${log.arch} | Version: v${log.version}`;
                                         } else if (log.type === 'daily_mapd') {
                                             details = `24h Ping: Reqs: ${log.total_requests} | Tokens: ${log.total_tokens} | Users: ${log.total_users}`;
                                         } else {

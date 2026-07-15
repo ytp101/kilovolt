@@ -72,10 +72,13 @@ async fn send_startup_telemetry(client: reqwest::Client, client_hash: String) {
 
     info!("Sending startup telemetry check-in to {}...", telemetry_endpoint);
 
+    let is_docker = std::path::Path::new("/.dockerenv").exists();
+
     let payload = serde_json::json!({
         "type": "startup",
         "client_hash": client_hash,
         "version": current_version,
+        "is_docker": is_docker,
         "os": os,
         "arch": arch
     });

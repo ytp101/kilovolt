@@ -75,9 +75,9 @@ export async function GET(request: Request) {
     const isDocker = searchParams.get('is_docker') === 'true';
     const os = searchParams.get('os') || 'unknown';
     const arch = searchParams.get('arch') || 'unknown';
-    const ip = request.headers.get('x-forwarded-for') || '127.0.0.1';
+    const ip = "incognito";
 
-    await saveTelemetryLog({ type: 'get_check', version, isDocker, os, arch, ip });
+    await saveTelemetryLog({ type: 'get_check', version, is_docker: isDocker, os, arch, ip });
 
     const latestVersion = '1.3.0';
     const updateAvailable = version !== latestVersion;
@@ -95,7 +95,7 @@ export async function POST(request: Request) {
         const payload = await request.json();
         const type = payload.type || 'unknown';
         const clientHash = payload.client_hash || 'unknown';
-        const ip = request.headers.get('x-forwarded-for') || '127.0.0.1';
+        const ip = "incognito";
 
         // 1. Process and save log entries based on types
         if (type === 'startup') {
@@ -103,6 +103,7 @@ export async function POST(request: Request) {
                 type: 'startup',
                 client_hash: clientHash,
                 version: payload.version || '0.0.0',
+                isDocker: payload.is_docker === true,
                 os: payload.os || 'unknown',
                 arch: payload.arch || 'unknown',
                 ip
