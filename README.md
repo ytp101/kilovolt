@@ -23,6 +23,7 @@ Furthermore, standard enterprise API gateways often buffer large token streams e
 
 - **Zero-Copy Stream Piping**: Pipes byte-chunks from OpenAI's SSE (`text/event-stream`) directly to client sockets. The gateway's memory footprint remains flat regardless of the size or duration of the chat stream.
 - **Pre-Flight Prompt Validation**: Inspects incoming payloads, calculates prompt tokens using tiktoken BPE, projects the USD cost, and rejects requests with `429 Too Many Requests` if the user is over budget.
+- **Multi-Tier Token Budgets**: Supports per-step prompt checks, per-pipeline stuck-loop guards, and per-day token safety caps.
 - **Mid-Stream Circuit Breaker**: Actively parses streaming SSE chunks to count output tokens on the fly. The exact millisecond the cumulative spend exceeds the budget limit, it severs the TCP connection.
 - **Upstream Refund Guard**: If an upstream connection fails or returns an error response, the pre-flight prompt cost is automatically refunded to the user's spend ledger.
 - **Connection Abortion**: Monitors downstream client sockets. If a client terminates a request early, Kilovolt instantly drops the upstream socket, canceling downstream transmission and preventing "ghost token" billing.
@@ -124,6 +125,37 @@ async function main() {
   }
 }
 main();
+```
+
+## 🛑 Token Budgets (Enforcement Gates)
+
+Kilovolt supports multi-tier token budgeting to protect your LLM workflows from infinite loops, prompt bloat, and runaway credit card bills.
+
+### Configuration
+
+Add the following environment variables to your `.env` file to configure limits:
+
+```env
+# Worst-case token consumption estimate per request step
+KILOVOLT_PER_STEP_TOKENS=2048
+
+# Maximum tokens allowed inside a single pipeline run (stuck-loop guard)
+KILOVOLT_PER_PIPELINE_TOKENS=10000
+
+# Daily token ceiling across all runs and clients (resets at server-midnight)
+KILOVOLT_PER_DAY_TOKENS=100000
+```
+
+### Routing & Pipeline Context Headers
+
+Clients can specify execution context in headers to associate requests under specific pipelines and steps:
+* `X-Pipeline-ID`: Unique ID for the active pipeline run (aggregates token counts across multiple requests).
+* `X-Pipeline-Name`: Human-readable name of the pipeline (used in logs).
+* `X-Step-Name`: Human-readable name of the active step.
+
+Example cased warning output logged on budget breaches:
+```text
+[pipeline:Alpha][step:Summarize] BUDGET_BLOCKED: daily token limit 100000 would be exceeded (used: 98500, requested: 2048)
 ```
 
 ## 🗺️ Future Roadmap
