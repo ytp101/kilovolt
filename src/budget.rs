@@ -17,6 +17,62 @@ pub struct ModelPricing {
     pub output_cost_per_token: f64,
 }
 
+/// Pre-flight check for multi-tier token budgeting.
+pub fn check_token_budgets(
+    state: &AppState,
+    pipeline_id: Option<&str>,
+    prompt_tokens: usize,
+) -> Result<(), String> {
+    // 1. Day Rollover check
+    let today = chrono::Local::now().date_naive();
+    {
+        let mut day_start_lock = state.day_start.write().unwrap();
+        if *day_start_lock != today {
+            *day_start_lock = today;
+            state.tokens_used_today.store(0, Ordering::Relaxed);
+        }
+    }
+
+    // 2. Per-Step Check (enforcing that this specific step's prompt tokens don't exceed the limit)
+    if let Some(step_limit) = state.per_step_tokens {
+        if prompt_tokens > step_limit {
+            return Err(format!(
+                "BUDGET_BLOCKED: step token limit {} exceeded by prompt size (prompt size: {})",
+                step_limit, prompt_tokens
+            ));
+        }
+    }
+
+    // 3. Per-Day Check
+    if let Some(day_limit) = state.per_day_tokens {
+        let requested = state.per_step_tokens.unwrap_or(2048);
+        let used_today = state.tokens_used_today.load(Ordering::Relaxed);
+        if used_today + requested > day_limit {
+            return Err(format!(
+                "BUDGET_BLOCKED: daily token limit {} would be exceeded (used: {}, requested: {})",
+                day_limit, used_today, requested
+            ));
+        }
+    }
+
+    // 4. Per-Pipeline Check
+    if let Some(pipeline_limit) = state.per_pipeline_tokens {
+        if let Some(pid) = pipeline_id {
+            let requested = state.per_step_tokens.unwrap_or(2048);
+            let tracker = state.pipeline_tracker.read().unwrap();
+            let used_pipeline = tracker.get(pid).cloned().unwrap_or(0);
+            if used_pipeline + requested > pipeline_limit {
+                return Err(format!(
+                    "BUDGET_BLOCKED: pipeline token limit {} would be exceeded (used: {}, requested: {})",
+                    pipeline_limit, used_pipeline, requested
+                ));
+            }
+        }
+    }
+
+    Ok(())
+}
+
 /// Dynamic pricing matrix loader based on OpenAI model definitions.
 pub fn get_model_pricing(model: &str) -> ModelPricing {
     match model {
@@ -80,6 +136,7 @@ pub struct StreamMonitor<S> {
     pub is_gemini: bool,
     pub pending_output: Vec<u8>,
     pub sent_done: bool,
+    pub pipeline_id: Option<String>,
 }
 
 impl<S> StreamMonitor<S> {
@@ -96,6 +153,7 @@ impl<S> StreamMonitor<S> {
         budget_limit: f64,
         state: AppState,
         is_gemini: bool,
+        pipeline_id: Option<String>,
     ) -> Self {
         let bpe = bpe_for_model(&model)
             .ok()
@@ -124,6 +182,7 @@ impl<S> StreamMonitor<S> {
             is_gemini,
             pending_output: Vec::new(),
             sent_done: false,
+            pipeline_id,
         }
     }
 
@@ -165,6 +224,14 @@ impl<S> StreamMonitor<S> {
             total_tokens,
             request_cost,
         );
+
+        // Record token budgets consumption
+        self.state.tokens_used_today.fetch_add(total_tokens, Ordering::Relaxed);
+        if let Some(pid) = &self.pipeline_id {
+            let mut tracker = self.state.pipeline_tracker.write().unwrap();
+            let entry = tracker.entry(pid.clone()).or_insert(0);
+            *entry += total_tokens;
+        }
 
         self.logged = true;
     }

@@ -221,9 +221,24 @@ async fn main() {
         .and_then(|s| s.parse::<f64>().ok())
         .unwrap_or(1.00);
 
+    let per_step_tokens = std::env::var("KILOVOLT_PER_STEP_TOKENS")
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok());
+
+    let per_pipeline_tokens = std::env::var("KILOVOLT_PER_PIPELINE_TOKENS")
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok());
+
+    let per_day_tokens = std::env::var("KILOVOLT_PER_DAY_TOKENS")
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok());
+
     info!(
         port = %port,
         default_budget = %default_budget,
+        per_step_tokens = ?per_step_tokens,
+        per_pipeline_tokens = ?per_pipeline_tokens,
+        per_day_tokens = ?per_day_tokens,
         "Configuration loaded successfully"
     );
 
@@ -245,6 +260,12 @@ async fn main() {
         spend_tracker,
         default_budget,
         port,
+        per_step_tokens,
+        per_pipeline_tokens,
+        per_day_tokens,
+        tokens_used_today: Arc::new(AtomicUsize::new(0)),
+        day_start: Arc::new(RwLock::new(chrono::Local::now().date_naive())),
+        pipeline_tracker: Arc::new(RwLock::new(HashMap::new())),
         start_time: Instant::now(),
         total_requests: Arc::new(AtomicUsize::new(0)),
         total_latency_ms: Arc::new(AtomicU64::new(0)),

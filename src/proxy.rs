@@ -254,6 +254,33 @@ pub async fn chat_completions_proxy(
         }
     };
 
+    // 6.5. Pre-flight check for multi-tier token budgeting
+    let pipeline_id = headers.get("X-Pipeline-ID")
+        .and_then(|val| val.to_str().ok())
+        .map(|s| s.to_string());
+    let pipeline_name = headers.get("X-Pipeline-Name")
+        .and_then(|val| val.to_str().ok())
+        .unwrap_or("unknown-pipeline");
+    let step_name = headers.get("X-Step-Name")
+        .and_then(|val| val.to_str().ok())
+        .unwrap_or("unknown-step");
+
+    if let Err(err_msg) = crate::budget::check_token_budgets(&state, pipeline_id.as_deref(), prompt_tokens) {
+        warn!(
+            pipeline = %pipeline_name,
+            step = %step_name,
+            error = %err_msg,
+            "[pipeline:{}][step:{}] {}", pipeline_name, step_name, err_msg
+        );
+        state.record_request(&request_id, &user_id, &request.model, 429, start_time.elapsed().as_millis() as u64, prompt_tokens, 0.0);
+        return make_error_response(
+            StatusCode::TOO_MANY_REQUESTS,
+            &err_msg,
+            "requests",
+            Some("budget_exceeded"),
+        );
+    }
+
     // Update total tokens consumed globally (prompt tokens first)
     state.total_tokens_consumed.fetch_add(prompt_tokens, Ordering::Relaxed);
 
@@ -476,6 +503,7 @@ pub async fn chat_completions_proxy(
         state.default_budget,
         state.clone(), // Pass state to enable stats updates on close/cancel
         is_gemini,
+        pipeline_id,
     );
 
     // Map the stream back to axum::Error to build the Axum response Body

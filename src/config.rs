@@ -2,6 +2,7 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex, RwLock};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::Instant;
+use chrono::NaiveDate;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -9,6 +10,16 @@ pub struct AppState {
     pub spend_tracker: Arc<RwLock<HashMap<String, f64>>>,
     pub default_budget: f64,
     pub port: u16,
+
+    // Token budget configuration
+    pub per_step_tokens: Option<usize>,
+    pub per_pipeline_tokens: Option<usize>,
+    pub per_day_tokens: Option<usize>,
+
+    // Token budget trackers
+    pub tokens_used_today: Arc<AtomicUsize>,
+    pub day_start: Arc<RwLock<NaiveDate>>,
+    pub pipeline_tracker: Arc<RwLock<HashMap<String, usize>>>,
 
     // Telemetry and stats tracking
     pub start_time: Instant,
