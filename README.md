@@ -1,5 +1,7 @@
 # Kilovolt (kvlt) ⚡
 
+🚀 **Want a hosted version? [Join the Kilovolt Cloud Waitlist](https://kilovolt.vercel.app/).**
+
 [![Rust](https://img.shields.io/badge/rust-stable-brightgreen.svg)](https://www.rust-lang.org) [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 **Kilovolt (kvlt)** is a hyper-optimized, high-throughput asynchronous reverse proxy designed to act as a **Bankruptcy Shield** for independent developers, startups, and coding agents running AI applications on low-resource hardware.

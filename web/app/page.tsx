@@ -1,6 +1,42 @@
-import React from 'react';
+'use client';
+
+import React, { useState } from 'react';
 
 export default function Home() {
+  const [email, setEmail] = useState('');
+  const [submitting, setSubmitting] = useState(false);
+  const [submitted, setSubmitted] = useState(false);
+  const [message, setMessage] = useState('');
+  const [error, setError] = useState<string | null>(null);
+
+  const handleJoinWaitlist = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setSubmitting(true);
+    setError(null);
+
+    try {
+      const res = await fetch('/api/waitlist', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ email }),
+      });
+
+      const data = await res.json();
+      if (res.ok) {
+        setSubmitted(true);
+        setMessage(data.message || 'Successfully joined the waitlist!');
+      } else {
+        setError(data.error || 'Failed to join waitlist. Please try again.');
+      }
+    } catch (err) {
+      setError('An unexpected error occurred. Please try again.');
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100 font-sans selection:bg-yellow-500 selection:text-slate-950 overflow-hidden relative">
       {/* Background radial glow */}
@@ -29,7 +65,7 @@ export default function Home() {
               className="text-xs bg-slate-900 border border-slate-800 text-slate-300 px-3 py-1.5 rounded-full hover:border-yellow-500/30 transition font-mono flex items-center space-x-2"
             >
               <span className="h-1.5 w-1.5 rounded-full bg-green-400 animate-pulse"></span>
-              <span>Telemetry: v1.3.0</span>
+              <span>Telemetry: v1.3.1</span>
             </a>
           </div>
         </div>
@@ -52,19 +88,46 @@ export default function Home() {
           <p className="text-lg sm:text-xl text-slate-400 leading-relaxed max-w-2xl mx-auto">
             Kilovolt is an ultra-fast, zero-config reverse proxy that intercepts, tokenizes, and terminates AI streaming queries the millisecond they cross your budget.
           </p>
-          <div className="flex flex-col sm:flex-row justify-center items-center gap-4">
-            <a 
-              href="https://github.com/ytp101/kilovolt#readme"
-              className="px-8 py-4 bg-gradient-to-r from-yellow-500 to-amber-500 text-slate-950 font-bold rounded-xl shadow-lg shadow-yellow-500/20 hover:from-yellow-400 hover:to-amber-400 hover:shadow-xl hover:shadow-yellow-500/30 transition transform hover:-translate-y-0.5 text-center w-full sm:w-auto"
-            >
-              Get Started
-            </a>
-            <a 
-              href="/v1/update-check"
-              className="px-8 py-4 bg-slate-900 border border-slate-800 text-slate-200 font-semibold rounded-xl hover:bg-slate-850 hover:border-slate-700 transition text-center w-full sm:w-auto"
-            >
-              Telemetry API
-            </a>
+
+          {/* Waitlist Form Section */}
+          <div className="max-w-md mx-auto space-y-4">
+            {!submitted ? (
+              <form onSubmit={handleJoinWaitlist} className="flex flex-col sm:flex-row items-center gap-3">
+                <input
+                  type="email"
+                  placeholder="Enter your work email"
+                  required
+                  value={email}
+                  onChange={(e) => setEmail(e.target.value)}
+                  disabled={submitting}
+                  className="w-full px-4 py-3 bg-slate-900/60 border border-slate-800 rounded-xl focus:outline-none focus:border-yellow-500 text-slate-100 placeholder:text-slate-500 font-mono text-sm transition"
+                />
+                <button
+                  type="submit"
+                  disabled={submitting}
+                  className="w-full sm:w-auto px-6 py-3 bg-gradient-to-r from-yellow-500 to-amber-500 hover:from-yellow-400 hover:to-amber-400 text-slate-950 font-bold rounded-xl transition duration-200 transform active:scale-95 disabled:opacity-50 text-sm whitespace-nowrap cursor-pointer shadow-lg shadow-yellow-500/10"
+                >
+                  {submitting ? 'Joining...' : 'Join Waitlist'}
+                </button>
+              </form>
+            ) : (
+              <div className="p-4 bg-emerald-500/10 border border-emerald-500/25 rounded-xl text-emerald-400 text-sm font-medium">
+                🎉 {message}
+              </div>
+            )}
+            {error && (
+              <p className="text-red-400 text-xs font-mono">{error}</p>
+            )}
+            <div className="pt-2">
+              <a 
+                href="https://github.com/ytp101/kilovolt#readme"
+                target="_blank"
+                rel="noreferrer"
+                className="text-xs text-slate-400 hover:text-yellow-400 underline decoration-slate-800 hover:decoration-yellow-500 transition font-medium"
+              >
+                Or read the self-hosted setup docs &rarr;
+              </a>
+            </div>
           </div>
         </section>
 
