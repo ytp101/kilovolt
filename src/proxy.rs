@@ -2206,7 +2206,7 @@ mod tests {
             for &right in CANDIDATES {
                 let independent = token_count(model, left) + token_count(model, right);
                 let concatenated = token_count(model, &format!("{left}{right}"));
-                if independent != concatenated {
+                if independent > concatenated {
                     return (left, right);
                 }
             }
@@ -2393,8 +2393,8 @@ mod tests {
             locally_accounted_choice_tokens(model, &choices, "delta"),
             Ok(expected)
         );
-        assert_ne!(
-            expected, old_concatenated,
+        assert!(
+            expected > old_concatenated,
             "the regression case must detect cross-choice BPE merging"
         );
     }
