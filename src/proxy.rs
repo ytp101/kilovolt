@@ -785,9 +785,7 @@ fn locally_accounted_choice_tokens(
     choices: &[serde_json::Value],
     payload_field: &str,
 ) -> Result<usize, &'static str> {
-    let mut canonical_choices = Vec::with_capacity(choices.len());
-    let mut plain_text = String::new();
-    let mut all_plain = true;
+    let mut total_tokens = 0usize;
     for choice in choices {
         let object = choice.as_object().ok_or("choice was not an object")?;
         for (field, value) in object {
@@ -803,21 +801,23 @@ fn locally_accounted_choice_tokens(
             .get(payload_field)
             .ok_or("choice had no supported generated payload")?;
         let representation = canonicalize_generated_object(generated)?;
-        if let Some(text) = representation.plain_text.as_deref() {
-            plain_text.push_str(text);
+        let choice_tokens = if let Some(text) = representation.plain_text {
+            token_count(model, &text)
         } else {
-            all_plain = false;
-        }
-        canonical_choices.push(representation.canonical);
+            token_count(model, &representation.canonical.to_string())
+        };
+        total_tokens = checked_add_completion_tokens(total_tokens, choice_tokens)?;
     }
-    if all_plain {
-        Ok(token_count(model, &plain_text))
-    } else {
-        Ok(token_count(
-            model,
-            &serde_json::Value::Array(canonical_choices).to_string(),
-        ))
-    }
+    Ok(total_tokens)
+}
+
+fn checked_add_completion_tokens(
+    accumulated: usize,
+    choice_tokens: usize,
+) -> Result<usize, &'static str> {
+    accumulated
+        .checked_add(choice_tokens)
+        .ok_or("completion token count overflowed")
 }
 
 pub(crate) fn streaming_output_tokens(
@@ -2114,8 +2114,10 @@ pub async fn chat_completions_proxy(
 #[cfg(test)]
 mod tests {
     use super::{
-        IncomingRequest, canonical_prompt_tokens, chat_completions_proxy, mock_chat_completions,
-        non_stream_output_tokens, select_non_stream_output_bound, streaming_output_tokens,
+        IncomingRequest, canonical_prompt_tokens, canonicalize_generated_object,
+        chat_completions_proxy, checked_add_completion_tokens, locally_accounted_choice_tokens,
+        mock_chat_completions, non_stream_output_tokens, select_non_stream_output_bound,
+        streaming_output_tokens, token_count,
     };
     use axum::Router;
     use axum::body::{Body, Bytes};
@@ -2196,6 +2198,32 @@ mod tests {
         let tokens = num_tokens_from_messages("gpt-4o-mini", &messages)
             .expect("test prompt should tokenize");
         tokens as f64 * get_model_pricing("gpt-4o-mini").input_cost_per_token
+    }
+
+    fn find_choice_boundary_case(model: &str) -> (&'static str, &'static str) {
+        const CANDIDATES: &[&str] = &["a", "b", "hello", " world", "{", "}", "1", "2"];
+        for &left in CANDIDATES {
+            for &right in CANDIDATES {
+                let independent = token_count(model, left) + token_count(model, right);
+                let concatenated = token_count(model, &format!("{left}{right}"));
+                if independent != concatenated {
+                    return (left, right);
+                }
+            }
+        }
+        panic!("test candidates did not expose a tokenizer boundary case");
+    }
+
+    fn independently_accounted_generated_tokens(
+        model: &str,
+        generated: &serde_json::Value,
+    ) -> usize {
+        let representation = canonicalize_generated_object(generated)
+            .expect("generated payload should be supported");
+        match representation.plain_text {
+            Some(text) => token_count(model, &text),
+            None => token_count(model, &representation.canonical.to_string()),
+        }
     }
 
     async fn spawn_mock_upstream(status: StatusCode) -> (u16, tokio::task::JoinHandle<()>) {
@@ -2348,6 +2376,133 @@ mod tests {
             "choices": [{"delta": {"content": "", "new_billable_field": "hidden"}}]
         });
         assert!(streaming_output_tokens("gpt-4o-mini", &unknown).is_err());
+    }
+
+    #[test]
+    fn multiple_plain_choices_are_tokenized_independently() {
+        let model = "gpt-4o-mini";
+        let (left, right) = find_choice_boundary_case(model);
+        let choices = vec![
+            serde_json::json!({"delta": {"content": left}}),
+            serde_json::json!({"delta": {"content": right}}),
+        ];
+        let expected = token_count(model, left) + token_count(model, right);
+        let old_concatenated = token_count(model, &format!("{left}{right}"));
+
+        assert_eq!(
+            locally_accounted_choice_tokens(model, &choices, "delta"),
+            Ok(expected)
+        );
+        assert_ne!(
+            expected, old_concatenated,
+            "the regression case must detect cross-choice BPE merging"
+        );
+    }
+
+    #[test]
+    fn multiple_tool_call_choices_are_tokenized_independently() {
+        let model = "gpt-4o-mini";
+        let first = serde_json::json!({"tool_calls": [{
+            "index": 0, "id": "call_1", "type": "function",
+            "function": {"name": "forecast", "arguments": "{\"city\":\"Bangkok\"}"}
+        }]});
+        let second = serde_json::json!({"function_call": {
+            "name": "clock", "arguments": "{\"zone\":\"UTC\"}"
+        }});
+        let choices = vec![
+            serde_json::json!({"delta": first.clone()}),
+            serde_json::json!({"delta": second.clone()}),
+        ];
+        let expected = independently_accounted_generated_tokens(model, &first)
+            + independently_accounted_generated_tokens(model, &second);
+
+        assert_eq!(
+            locally_accounted_choice_tokens(model, &choices, "delta"),
+            Ok(expected)
+        );
+    }
+
+    #[test]
+    fn streaming_multiple_choices_use_independent_accumulation() {
+        let model = "gpt-4o-mini";
+        let (left, right) = find_choice_boundary_case(model);
+        let frame = serde_json::json!({
+            "choices": [
+                {"delta": {"content": left}},
+                {"delta": {"content": right}}
+            ]
+        });
+
+        assert_eq!(
+            streaming_output_tokens(model, &frame),
+            Ok(token_count(model, left) + token_count(model, right))
+        );
+    }
+
+    #[test]
+    fn non_stream_multiple_choices_without_usage_use_independent_fallback() {
+        let model = "gpt-4o-mini";
+        let (left, right) = find_choice_boundary_case(model);
+        let response = serde_json::json!({
+            "choices": [
+                {"message": {"role": "assistant", "content": left}},
+                {"message": {"role": "assistant", "content": right}}
+            ]
+        });
+        let expected = token_count(model, left) + token_count(model, right);
+
+        assert_eq!(
+            non_stream_output_tokens(model, &response),
+            Ok((expected, "local supported-message tokenizer fallback"))
+        );
+    }
+
+    #[test]
+    fn mixed_plain_and_tool_choices_are_summed_independently() {
+        let model = "gpt-4o-mini";
+        let tool = serde_json::json!({"tool_calls": [{
+            "index": 0, "id": "call_mixed", "type": "function",
+            "function": {"name": "lookup", "arguments": "{\"id\":7}"}
+        }]});
+        let choices = vec![
+            serde_json::json!({"delta": {"content": "answer"}}),
+            serde_json::json!({"delta": tool.clone()}),
+        ];
+        let expected =
+            token_count(model, "answer") + independently_accounted_generated_tokens(model, &tool);
+
+        assert_eq!(
+            locally_accounted_choice_tokens(model, &choices, "delta"),
+            Ok(expected)
+        );
+    }
+
+    #[test]
+    fn unsupported_field_in_any_choice_fails_the_entire_accounting_operation() {
+        let choices = vec![
+            serde_json::json!({"delta": {"content": "supported"}}),
+            serde_json::json!({"delta": {
+                "content": "",
+                "unknown_billable_output": "must fail closed"
+            }}),
+        ];
+
+        assert_eq!(
+            locally_accounted_choice_tokens("gpt-4o-mini", &choices, "delta"),
+            Err("unsupported billable output field")
+        );
+    }
+
+    #[test]
+    fn completion_choice_accumulation_overflow_fails_closed() {
+        assert_eq!(
+            checked_add_completion_tokens(usize::MAX, 1),
+            Err("completion token count overflowed")
+        );
+        assert_eq!(
+            checked_add_completion_tokens(usize::MAX - 1, 1),
+            Ok(usize::MAX)
+        );
     }
 
     #[test]
