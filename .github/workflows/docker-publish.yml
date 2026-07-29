@@ -12,6 +12,20 @@ jobs:
       - name: Check out the repo
         uses: actions/checkout@v7
 
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Verify release tag matches Cargo version
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          set -euo pipefail
+          CARGO_VERSION="$(
+            cargo metadata --no-deps --format-version 1 |
+              jq -r '.packages[] | select(.name == "kilovolt") | .version'
+          )"
+          test "v${CARGO_VERSION}" = "${RELEASE_TAG}"
+
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v4
 
