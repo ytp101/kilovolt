@@ -19,17 +19,21 @@ The request shape and response accounting limits are documented in
 
 ## Pricing warning
 
-`src/budget.rs` contains compiled prefix-based prices and an unknown-model
-fallback. Those values were not independently verified in the offline Phase 3
-run and may be outdated or wrong for a custom provider. Operators must validate
-them before production. Calculated spend is not an exact provider invoice.
+Kilovolt has metadata-bearing built-in entries and supports a validated local
+operator registry. Unknown models fail closed before upstream; there is no
+arbitrary fallback. Built-in values were not independently verified in this
+offline work and may be outdated. Operators must validate them before
+production. Calculated spend is not an exact provider invoice.
 
 ## Accounting boundaries
 
-- Prompt input is locally estimated from supported chat messages.
+- Basic prompt input uses the existing message estimator; advanced
+  tool/function/structured requests use the maximum of that and a canonical
+  billable-request estimate.
 - Non-stream output prefers integer `usage.completion_tokens`, then falls back
   to complete supported message content.
-- Streaming output counts supported text per complete SSE event. BPE counts can
-  differ from whole-answer tokenization.
-- Tool/function-only streaming payloads are not fully covered.
+- Streaming output counts supported text, refusal, function, tool, and
+  structured generated fields per complete SSE event. Unknown non-empty
+  generated fields fail closed.
+- Non-stream requests reserve a selected maximum output cost before upstream.
 - The financial ledger uses `f64` and is process-local/in-memory.

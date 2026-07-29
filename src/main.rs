@@ -2,6 +2,7 @@ mod budget;
 mod config;
 mod dashboard;
 mod ledger;
+mod pricing;
 mod proxy;
 
 use axum::{
@@ -22,6 +23,7 @@ use crate::config::{
 };
 use crate::dashboard::{get_dashboard, get_stats};
 use crate::ledger::BudgetLedger;
+use crate::pricing::PricingRegistry;
 use crate::proxy::{chat_completions_proxy, mock_chat_completions};
 
 /// Simple health check probe.
@@ -251,6 +253,104 @@ fn parse_positive_size(raw: Option<&str>, default: usize) -> usize {
         .unwrap_or(default)
 }
 
+fn parse_optional_positive_size(
+    raw: Option<&str>,
+    variable: &str,
+) -> Result<Option<usize>, String> {
+    match raw {
+        None => Ok(None),
+        Some(value) => value
+            .trim()
+            .parse::<usize>()
+            .ok()
+            .filter(|parsed| *parsed > 0)
+            .map(Some)
+            .ok_or_else(|| format!("{variable} must be a positive integer")),
+    }
+}
+
+fn parse_strict_bool(raw: Option<&str>, variable: &str) -> Result<bool, String> {
+    match raw.map(str::trim).map(str::to_ascii_lowercase).as_deref() {
+        None | Some("0" | "false" | "no" | "off") => Ok(false),
+        Some("1" | "true" | "yes" | "on") => Ok(true),
+        Some(_) => Err(format!(
+            "{variable} must be one of true/false, 1/0, yes/no, or on/off"
+        )),
+    }
+}
+
+fn is_loopback_bind(bind: &str) -> bool {
+    let bind = bind.trim();
+    if bind.eq_ignore_ascii_case("localhost") {
+        return true;
+    }
+    if let Ok(address) = bind.parse::<std::net::SocketAddr>() {
+        return address.ip().is_loopback();
+    }
+    if let Ok(ip) = bind.parse::<std::net::IpAddr>() {
+        return ip.is_loopback();
+    }
+    if let Some((host, port)) = bind.rsplit_once(':')
+        && port.parse::<u16>().is_ok()
+    {
+        return host.eq_ignore_ascii_case("localhost")
+            || host
+                .trim_matches(['[', ']'])
+                .parse::<std::net::IpAddr>()
+                .is_ok_and(|ip| ip.is_loopback());
+    }
+    false
+}
+
+fn validate_deployment_safety(
+    bind: &str,
+    acknowledge_process_local_ledger: bool,
+    proxy_token_configured: bool,
+    allow_unauthenticated_public_proxy: bool,
+) -> Result<(), String> {
+    if is_loopback_bind(bind) {
+        return Ok(());
+    }
+    if !acknowledge_process_local_ledger {
+        return Err(
+            "Non-loopback startup requires KILOVOLT_ACKNOWLEDGE_PROCESS_LOCAL_LEDGER=true. \
+             Spend resets on restart, multiple instances multiply the effective budget, and one \
+             logical project budget must use one Kilovolt process."
+                .to_string(),
+        );
+    }
+    if !proxy_token_configured && !allow_unauthenticated_public_proxy {
+        return Err(
+            "Non-loopback startup requires KILOVOLT_PROXY_TOKEN or the explicit unsafe override \
+             KILOVOLT_ALLOW_UNAUTHENTICATED_PUBLIC_PROXY=true."
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
+fn bind_address(bind: &str, port: u16) -> String {
+    let bind = bind.trim();
+    if bind.parse::<std::net::SocketAddr>().is_ok() {
+        bind.to_string()
+    } else if let Ok(ip) = bind.parse::<std::net::IpAddr>() {
+        std::net::SocketAddr::new(ip, port).to_string()
+    } else if bind
+        .rsplit_once(':')
+        .is_some_and(|(_, candidate_port)| candidate_port.parse::<u16>().is_ok())
+    {
+        bind.to_string()
+    } else {
+        format!("{bind}:{port}")
+    }
+}
+
+fn fatal_configuration(message: &str) -> ! {
+    error!("{message}");
+    eprintln!("Kilovolt configuration error: {message}");
+    std::process::exit(1);
+}
+
 #[tokio::main]
 async fn main() {
     // Load environment variables from a `.env` file if present
@@ -272,6 +372,11 @@ async fn main() {
         .ok()
         .and_then(|s| s.parse::<u16>().ok())
         .unwrap_or(8080);
+    let bind = std::env::var("BIND_ADDR")
+        .ok()
+        .or_else(|| std::env::var("HOST").ok())
+        .unwrap_or_else(|| "127.0.0.1".to_string());
+    let addr = bind_address(&bind, port);
 
     let default_budget = std::env::var("KILOVOLT_DEFAULT_BUDGET")
         .ok()
@@ -347,6 +452,51 @@ async fn main() {
         );
     }
 
+    let non_stream_default_max_output_tokens = parse_optional_positive_size(
+        std::env::var("KILOVOLT_NON_STREAM_DEFAULT_MAX_OUTPUT_TOKENS")
+            .ok()
+            .as_deref(),
+        "KILOVOLT_NON_STREAM_DEFAULT_MAX_OUTPUT_TOKENS",
+    )
+    .unwrap_or_else(|message| fatal_configuration(&message));
+
+    let proxy_token = std::env::var("KILOVOLT_PROXY_TOKEN")
+        .ok()
+        .filter(|token| !token.is_empty())
+        .map(Arc::<str>::from);
+    let acknowledge_process_local_ledger = parse_strict_bool(
+        std::env::var("KILOVOLT_ACKNOWLEDGE_PROCESS_LOCAL_LEDGER")
+            .ok()
+            .as_deref(),
+        "KILOVOLT_ACKNOWLEDGE_PROCESS_LOCAL_LEDGER",
+    )
+    .unwrap_or_else(|message| fatal_configuration(&message));
+    let allow_unauthenticated_public_proxy = parse_strict_bool(
+        std::env::var("KILOVOLT_ALLOW_UNAUTHENTICATED_PUBLIC_PROXY")
+            .ok()
+            .as_deref(),
+        "KILOVOLT_ALLOW_UNAUTHENTICATED_PUBLIC_PROXY",
+    )
+    .unwrap_or_else(|message| fatal_configuration(&message));
+    let mock_upstream_enabled = parse_strict_bool(
+        std::env::var("KILOVOLT_ENABLE_MOCK_UPSTREAM")
+            .ok()
+            .as_deref(),
+        "KILOVOLT_ENABLE_MOCK_UPSTREAM",
+    )
+    .unwrap_or_else(|message| fatal_configuration(&message));
+    validate_deployment_safety(
+        &bind,
+        acknowledge_process_local_ledger,
+        proxy_token.is_some(),
+        allow_unauthenticated_public_proxy,
+    )
+    .unwrap_or_else(|message| fatal_configuration(&message));
+
+    let pricing_file = std::env::var("KILOVOLT_PRICING_FILE").ok();
+    let pricing_registry = PricingRegistry::load(pricing_file.as_deref().map(std::path::Path::new))
+        .unwrap_or_else(|error| fatal_configuration(&format!("KILOVOLT_PRICING_FILE: {error}")));
+
     let dashboard_token = std::env::var("KILOVOLT_DASHBOARD_TOKEN")
         .ok()
         .filter(|token| !token.is_empty())
@@ -380,6 +530,16 @@ async fn main() {
         max_request_body_bytes = %max_request_body_bytes,
         max_upstream_body_bytes = %max_upstream_body_bytes,
         max_sse_frame_bytes = %max_sse_frame_bytes,
+        non_stream_default_max_output_tokens = ?non_stream_default_max_output_tokens,
+        pricing_file = ?pricing_file,
+        operator_pricing_entries = %pricing_registry.operator_entry_count(),
+        built_in_pricing_entries = %pricing_registry.built_in_entry_count(),
+        built_in_pricing_verified = false,
+        proxy_authentication_enabled = %proxy_token.is_some(),
+        mock_upstream_enabled = %mock_upstream_enabled,
+        process_local_ledger_acknowledged = %acknowledge_process_local_ledger,
+        allow_unauthenticated_public_proxy = %allow_unauthenticated_public_proxy,
+        bind_address = %addr,
         dashboard_enabled = %dashboard_token.is_some(),
         company_telemetry_enabled = %telemetry.enabled,
         openai_upstream_url = %openai_upstream_url,
@@ -418,6 +578,10 @@ async fn main() {
         max_request_body_bytes,
         max_upstream_body_bytes,
         max_sse_frame_bytes,
+        non_stream_default_max_output_tokens,
+        pricing_registry: Arc::new(pricing_registry),
+        proxy_token,
+        mock_upstream_enabled,
         dashboard_token,
         telemetry: telemetry.clone(),
         per_step_tokens,
@@ -458,18 +622,6 @@ async fn main() {
         .route("/mock/v1/chat/completions", post(mock_chat_completions))
         .with_state(state);
 
-    // Bind and serve dynamically using HOST / BIND_ADDR and KILOVOLT_PORT
-    let host = std::env::var("BIND_ADDR")
-        .ok()
-        .or_else(|| std::env::var("HOST").ok())
-        .unwrap_or_else(|| "0.0.0.0".to_string());
-
-    let addr = if host.contains(':') {
-        host
-    } else {
-        format!("{}:{}", host, port)
-    };
-
     let listener = match tokio::net::TcpListener::bind(&addr).await {
         Ok(l) => l,
         Err(e) => {
@@ -492,7 +644,9 @@ async fn main() {
 #[cfg(test)]
 mod tests {
     use super::{
-        daily_telemetry_payload, parse_bool, parse_positive_size, startup_telemetry_payload,
+        bind_address, daily_telemetry_payload, is_loopback_bind, parse_bool,
+        parse_optional_positive_size, parse_positive_size, parse_strict_bool,
+        startup_telemetry_payload, validate_deployment_safety,
     };
     use std::collections::HashMap;
 
@@ -510,6 +664,44 @@ mod tests {
         assert!(!parse_bool(Some("invalid"), false));
         assert!(parse_bool(Some("true"), false));
         assert!(!parse_bool(Some("off"), true));
+    }
+
+    #[test]
+    fn non_stream_default_and_security_booleans_fail_closed() {
+        assert_eq!(
+            parse_optional_positive_size(None, "TEST").expect("missing is optional"),
+            None
+        );
+        assert_eq!(
+            parse_optional_positive_size(Some("1000"), "TEST")
+                .expect("positive integer should parse"),
+            Some(1000)
+        );
+        assert!(parse_optional_positive_size(Some("0"), "TEST").is_err());
+        assert!(parse_strict_bool(Some("invalid"), "TEST").is_err());
+        assert!(parse_strict_bool(Some("true"), "TEST").unwrap());
+    }
+
+    #[test]
+    fn loopback_and_non_loopback_safety_rules_are_explicit() {
+        for bind in [
+            "127.0.0.1",
+            "127.0.0.1:8080",
+            "::1",
+            "[::1]:8080",
+            "localhost",
+        ] {
+            assert!(is_loopback_bind(bind), "{bind} should be loopback");
+            assert!(validate_deployment_safety(bind, false, false, false).is_ok());
+        }
+        assert!(!is_loopback_bind("0.0.0.0"));
+        assert!(validate_deployment_safety("0.0.0.0", false, true, false).is_err());
+        assert!(validate_deployment_safety("0.0.0.0", true, false, false).is_err());
+        assert!(validate_deployment_safety("0.0.0.0", true, true, false).is_ok());
+        assert!(validate_deployment_safety("0.0.0.0", true, false, true).is_ok());
+        assert_eq!(bind_address("127.0.0.1", 8080), "127.0.0.1:8080");
+        assert_eq!(bind_address("::1", 8080), "[::1]:8080");
+        assert_eq!(bind_address("0.0.0.0:9000", 8080), "0.0.0.0:9000");
     }
 
     #[test]

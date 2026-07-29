@@ -7,6 +7,7 @@ use std::time::Instant;
 use chrono::NaiveDate;
 
 use crate::ledger::BudgetLedger;
+use crate::pricing::PricingRegistry;
 
 pub const DEFAULT_MAX_REQUEST_BODY_BYTES: usize = 1024 * 1024;
 pub const DEFAULT_MAX_UPSTREAM_BODY_BYTES: usize = 4 * 1024 * 1024;
@@ -17,6 +18,20 @@ pub const DEFAULT_TELEMETRY_URL: &str = "https://kilovolt.vercel.app/v1/update-c
 pub struct TelemetryConfig {
     pub enabled: bool,
     pub endpoint: String,
+}
+
+/// Compares secret bytes without data-dependent early exit.
+pub fn secrets_match(expected: &str, actual: &str) -> bool {
+    let expected_bytes = expected.as_bytes();
+    let actual_bytes = actual.as_bytes();
+    let maximum_length = expected_bytes.len().max(actual_bytes.len());
+    let mut difference = expected_bytes.len() ^ actual_bytes.len();
+    for index in 0..maximum_length {
+        let left = expected_bytes.get(index).copied().unwrap_or(0);
+        let right = actual_bytes.get(index).copied().unwrap_or(0);
+        difference |= usize::from(left ^ right);
+    }
+    difference == 0
 }
 
 #[derive(Clone)]
@@ -31,6 +46,10 @@ pub struct AppState {
     pub max_request_body_bytes: usize,
     pub max_upstream_body_bytes: usize,
     pub max_sse_frame_bytes: usize,
+    pub non_stream_default_max_output_tokens: Option<usize>,
+    pub pricing_registry: Arc<PricingRegistry>,
+    pub proxy_token: Option<Arc<str>>,
+    pub mock_upstream_enabled: bool,
     pub dashboard_token: Option<Arc<str>>,
     pub telemetry: TelemetryConfig,
 
@@ -161,6 +180,10 @@ pub(crate) fn test_state_with_budgets(
         max_request_body_bytes: DEFAULT_MAX_REQUEST_BODY_BYTES,
         max_upstream_body_bytes: DEFAULT_MAX_UPSTREAM_BODY_BYTES,
         max_sse_frame_bytes: DEFAULT_MAX_SSE_FRAME_BYTES,
+        non_stream_default_max_output_tokens: Some(1_024),
+        pricing_registry: Arc::new(PricingRegistry::built_in()),
+        proxy_token: None,
+        mock_upstream_enabled: true,
         dashboard_token: Some(Arc::from("test-dashboard-token")),
         telemetry: TelemetryConfig {
             enabled: false,
@@ -184,10 +207,18 @@ pub(crate) fn test_state_with_budgets(
 
 #[cfg(test)]
 mod tests {
-    use super::test_state;
+    use super::{secrets_match, test_state};
     use axum::{Json, Router, routing::post};
     use serde_json::Value;
     use std::time::Duration;
+
+    #[test]
+    fn secret_comparison_handles_matches_mismatches_and_lengths() {
+        assert!(secrets_match("proxy-secret", "proxy-secret"));
+        assert!(!secrets_match("proxy-secret", "proxy-secreu"));
+        assert!(!secrets_match("proxy-secret", "proxy-secret-longer"));
+        assert!(!secrets_match("proxy-secret", ""));
+    }
 
     async fn telemetry_receiver(
         sender: tokio::sync::mpsc::UnboundedSender<Value>,

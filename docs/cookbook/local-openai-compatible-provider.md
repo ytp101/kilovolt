@@ -25,6 +25,7 @@ Example for a local server on port 11434:
 export KILOVOLT_OPENAI_UPSTREAM_URL=http://127.0.0.1:11434/v1/chat/completions
 export KILOVOLT_PROJECT_BUDGET=25
 export KILOVOLT_DEFAULT_BUDGET=5
+export KILOVOLT_PRICING_FILE="$PWD/pricing.json"
 export KILOVOLT_TELEMETRY_ENABLED=false
 ./target/release/kilovolt
 ```
@@ -46,9 +47,9 @@ curl --fail --silent --no-buffer \
 
 ## Verify it works
 
-Confirm valid ordered `data:` JSON frames ending in `[DONE]`, then test
-`"stream":false` and confirm an intact JSON completion with supported usage or
-message content.
+Confirm valid ordered `data:` JSON frames ending in `[DONE]`. For
+`"stream":false`, include a positive `max_completion_tokens` and confirm an
+intact JSON completion with supported usage or message/function/tool content.
 
 ## Expected success behavior
 
@@ -57,17 +58,18 @@ supported response shape.
 
 ## Expected budget-block behavior
 
-The same atomic project/user limits apply. Unknown model names use Kilovolt's
-compiled fallback price, which may be inappropriate for the local provider.
+The same atomic project/user limits apply. Unknown model names fail closed
+before upstream; add an exact or explicit prefix entry to the local pricing
+registry.
 
 ## Security notes
 
 Use TLS when the endpoint is not loopback/private. The URL receives the bearer
-credential. Do not assume a local provider's zero-dollar price matches the
-fallback.
+credential. Verify any configured zero-dollar local price rather than treating
+it as a general fallback.
 
 ## Common failure modes
 
-Wrong content type, different SSE/usage schema, tool-call-only output, or a
-different endpoint path can produce `502` or inaccurate accounting. Add a
-verified model price before financial use.
+Wrong content type, different SSE/usage schema, unknown generated fields, or a
+different endpoint path can produce `502`. Add a verified model price before
+financial use.

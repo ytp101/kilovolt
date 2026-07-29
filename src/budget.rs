@@ -11,13 +11,8 @@ use tracing::{error, info, warn};
 
 use crate::config::AppState;
 use crate::ledger::BudgetError;
-
-// Model-specific pricing configuration struct
-#[derive(Clone, Copy)]
-pub struct ModelPricing {
-    pub input_cost_per_token: f64,
-    pub output_cost_per_token: f64,
-}
+use crate::pricing::ModelPricing;
+use crate::proxy::streaming_output_tokens;
 
 /// Pre-flight check for multi-tier token budgeting.
 #[allow(clippy::collapsible_if)]
@@ -74,45 +69,6 @@ pub fn check_token_budgets(
     }
 
     Ok(())
-}
-
-/// Dynamic pricing matrix loader based on OpenAI model definitions.
-pub fn get_model_pricing(model: &str) -> ModelPricing {
-    match model {
-        m if m.starts_with("gpt-4o-mini") => ModelPricing {
-            input_cost_per_token: 0.15 / 1_000_000.0,
-            output_cost_per_token: 0.60 / 1_000_000.0,
-        },
-        m if m.starts_with("gpt-4o") => ModelPricing {
-            input_cost_per_token: 5.00 / 1_000_000.0,
-            output_cost_per_token: 15.00 / 1_000_000.0,
-        },
-        m if m.starts_with("gpt-4") => ModelPricing {
-            input_cost_per_token: 30.00 / 1_000_000.0,
-            output_cost_per_token: 60.00 / 1_000_000.0,
-        },
-        m if m.starts_with("gpt-3.5-turbo") => ModelPricing {
-            input_cost_per_token: 0.50 / 1_000_000.0,
-            output_cost_per_token: 1.50 / 1_000_000.0,
-        },
-        m if m.starts_with("gemini-1.5-flash") => ModelPricing {
-            input_cost_per_token: 0.075 / 1_000_000.0,
-            output_cost_per_token: 0.30 / 1_000_000.0,
-        },
-        m if m.starts_with("gemini-1.5-pro") => ModelPricing {
-            input_cost_per_token: 1.25 / 1_000_000.0,
-            output_cost_per_token: 5.00 / 1_000_000.0,
-        },
-        m if m.starts_with("gemini-") => ModelPricing {
-            input_cost_per_token: 0.075 / 1_000_000.0,
-            output_cost_per_token: 0.30 / 1_000_000.0,
-        },
-        _ => ModelPricing {
-            // Default fallback to gpt-4o pricing
-            input_cost_per_token: 5.00 / 1_000_000.0,
-            output_cost_per_token: 15.00 / 1_000_000.0,
-        },
-    }
 }
 
 /// A bounded SSE frame monitor that reconstructs events independently of
@@ -360,20 +316,14 @@ impl<S> StreamMonitor<S> {
             return;
         }
 
-        let mut output_text = String::new();
-        if let Some(choices) = value.get("choices").and_then(serde_json::Value::as_array) {
-            for choice in choices {
-                if let Some(content) = choice
-                    .get("delta")
-                    .and_then(|delta| delta.get("content"))
-                    .and_then(serde_json::Value::as_str)
-                {
-                    output_text.push_str(content);
-                }
+        let output_tokens = match streaming_output_tokens(&self.model, &value) {
+            Ok(tokens) => tokens,
+            Err(reason) => {
+                self.fail_protocol(reason);
+                return;
             }
-        }
-
-        if let Err(error) = self.charge_text(&output_text) {
+        };
+        if let Err(error) = self.try_charge_output_tokens(output_tokens) {
             warn!(
                 user_id = %self.user_id,
                 project_budget_limit = %self.state.project_budget,
@@ -541,11 +491,12 @@ impl<S> Drop for StreamMonitor<S> {
 
 #[cfg(test)]
 mod tests {
-    use super::{ModelPricing, StreamMonitor};
+    use super::StreamMonitor;
     use axum::body::Bytes;
     use futures_util::stream::{self, StreamExt};
 
     use crate::config::test_state;
+    use crate::pricing::ModelPricing;
 
     #[tokio::test]
     async fn rejected_output_increment_is_not_charged_or_forwarded() {
@@ -565,7 +516,7 @@ mod tests {
         assert_eq!(reservation.user.total_spend, committed.user.total_spend);
 
         let upstream = stream::iter(vec![Ok::<Bytes, std::io::Error>(Bytes::from(
-            "data: {\"choices\":[{\"delta\":{\"content\":\"hello\"}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"forecast\",\"arguments\":\"{\\\"city\\\":\\\"Bangkok\\\"}\"}}]}}]}\n\n",
         ))]);
         let mut monitor = StreamMonitor::new(
             upstream,
@@ -668,6 +619,46 @@ mod tests {
         );
         let (actual, _) = monitor_output(vec![Bytes::from_static(expected.as_bytes())]).await;
         assert_eq!(actual, expected);
+    }
+
+    #[tokio::test]
+    async fn split_function_and_tool_call_arguments_are_accounted_before_forwarding() {
+        let expected = concat!(
+            "data: {\"choices\":[{\"delta\":{\"function_call\":{\"name\":\"legacy\",\"arguments\":\"{\\\"a\\\":\"}}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"first\",\"arguments\":\"1}\"}},{\"index\":1,\"id\":\"call_2\",\"type\":\"function\",\"function\":{\"name\":\"second\",\"arguments\":\"{\\\"b\\\":2}\"}}]}}]}\n\n",
+            "data: [DONE]\n\n"
+        );
+        let bytes = expected.as_bytes();
+        let midpoint = bytes.len() / 2;
+        let (actual, state) = monitor_output(vec![
+            Bytes::copy_from_slice(&bytes[..midpoint]),
+            Bytes::copy_from_slice(&bytes[midpoint..]),
+        ])
+        .await;
+        assert_eq!(actual, expected);
+        assert!(
+            state
+                .total_tokens_consumed
+                .load(std::sync::atomic::Ordering::Relaxed)
+                > 0
+        );
+    }
+
+    #[tokio::test]
+    async fn unknown_potentially_billable_delta_is_not_forwarded() {
+        let event =
+            b"data: {\"choices\":[{\"delta\":{\"content\":\"\",\"audio\":\"hidden\"}}]}\n\n";
+        let (actual, state) = monitor_output(vec![Bytes::from_static(event)]).await;
+        assert!(actual.is_empty());
+        assert_eq!(
+            state
+                .recent_requests
+                .lock()
+                .unwrap()
+                .front()
+                .map(|record| record.status),
+            Some(502)
+        );
     }
 
     #[tokio::test]

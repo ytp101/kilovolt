@@ -18,6 +18,7 @@ Docker with BuildKit and enough resources to compile the multi-stage image.
 
 ```bash
 export KILOVOLT_DASHBOARD_TOKEN="$(openssl rand -hex 32)"
+export KILOVOLT_PROXY_TOKEN="$(openssl rand -hex 32)"
 docker build -t kilovolt:local .
 ```
 
@@ -26,8 +27,11 @@ docker build -t kilovolt:local .
 ```bash
 docker run --detach --name kilovolt-test \
   --publish 127.0.0.1:8080:8080 \
+  --env BIND_ADDR=0.0.0.0 \
+  --env KILOVOLT_ACKNOWLEDGE_PROCESS_LOCAL_LEDGER=true \
   --env KILOVOLT_PROJECT_BUDGET=25 \
   --env KILOVOLT_DEFAULT_BUDGET=5 \
+  --env KILOVOLT_PROXY_TOKEN="${KILOVOLT_PROXY_TOKEN}" \
   --env KILOVOLT_DASHBOARD_TOKEN="${KILOVOLT_DASHBOARD_TOKEN}" \
   --env KILOVOLT_TELEMETRY_ENABLED=false \
   kilovolt:local
@@ -52,8 +56,10 @@ when the process/container restarts.
 
 ## Security notes
 
-Bind to loopback/private interfaces, use a secret manager instead of image
-layers, and never bake API keys or dashboard tokens into the image.
+Publish the host port only on loopback/private interfaces, run exactly one
+container for one budget, use a secret manager instead of image layers, and
+never bake API keys or tokens into the image. The required acknowledgement does
+not make replicas or restarts safe.
 
 ## Common failure modes
 

@@ -79,6 +79,7 @@ def send_mock_request(port: int) -> None:
             "model": "gpt-4o-mini",
             "messages": [{"role": "user", "content": "telemetry smoke"}],
             "stream": False,
+            "max_completion_tokens": 64,
         }
     ).encode()
     request = urllib.request.Request(
@@ -109,6 +110,7 @@ def run_instance(enabled: bool, endpoint: str) -> None:
             "KILOVOLT_DEFAULT_BUDGET": "5",
             "KILOVOLT_TELEMETRY_ENABLED": "true" if enabled else "false",
             "KILOVOLT_TELEMETRY_URL": endpoint,
+            "KILOVOLT_ENABLE_MOCK_UPSTREAM": "true",
             "RUST_LOG": "kilovolt=error",
         }
     )
