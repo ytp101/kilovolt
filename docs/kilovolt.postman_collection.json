@@ -47,6 +47,12 @@
 						"value": "developer_1",
 						"type": "text",
 						"description": "Trusted identity inserted by the authenticated founder backend; never accept this value directly from an untrusted client"
+					},
+					{
+						"key": "X-Kilovolt-Key",
+						"value": "YOUR_KILOVOLT_PROXY_TOKEN",
+						"type": "text",
+						"description": "Required only when KILOVOLT_PROXY_TOKEN is configured; never forwarded to the provider"
 					}
 				],
 				"body": {
@@ -99,7 +105,13 @@
 						"key": "X-Mock-Upstream",
 						"value": "true",
 						"type": "text",
-						"description": "Forces Kilovolt to route to its internal mock upstream, bypassing OpenAI"
+						"description": "Routes to the internal mock only when KILOVOLT_ENABLE_MOCK_UPSTREAM=true; local tests only"
+					},
+					{
+						"key": "X-Kilovolt-Key",
+						"value": "YOUR_KILOVOLT_PROXY_TOKEN",
+						"type": "text",
+						"description": "Required when KILOVOLT_PROXY_TOKEN is configured"
 					}
 				],
 				"body": {
@@ -124,7 +136,7 @@
 						"completions"
 					]
 				},
-				"description": "Runs a proxy request using the mock upstream server. Ideal for verifying budget limits, streaming chunks, and mid-stream cutoffs."
+				"description": "Runs a local-only proxy request using the mock upstream server. Start Kilovolt with KILOVOLT_ENABLE_MOCK_UPSTREAM=true; leave it disabled in production."
 			},
 			"response": []
 		}

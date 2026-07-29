@@ -40,6 +40,8 @@ pub enum BudgetError {
     ReservationNotFound,
     ReservationAlreadyFinalized,
     ReservationUserMismatch,
+    InvalidReservationTransition,
+    OutputExceedsReservation,
 }
 
 impl fmt::Display for BudgetError {
@@ -68,16 +70,24 @@ impl fmt::Display for BudgetError {
             Self::ReservationUserMismatch => {
                 formatter.write_str("prompt reservation belongs to another user")
             }
+            Self::InvalidReservationTransition => {
+                formatter.write_str("reservation cannot perform that lifecycle transition")
+            }
+            Self::OutputExceedsReservation => {
+                formatter.write_str("actual output cost exceeds its reserved maximum")
+            }
         }
     }
 }
 
 impl std::error::Error for BudgetError {}
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 enum Finalization {
-    Committed,
+    StreamingCommitted,
     Released,
+    NonStreamSettled { output_amount: f64 },
+    NonStreamConservative,
 }
 
 #[derive(Debug, Default)]
@@ -96,10 +106,19 @@ impl AccountBudget {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReservationStage {
+    AwaitingAcceptance,
+    NonStreamAccepted,
+}
+
 #[derive(Debug)]
-struct PromptReservation {
+struct RequestReservation {
     user_id: String,
-    amount: f64,
+    prompt_amount: f64,
+    output_amount: f64,
+    non_streaming: bool,
+    stage: ReservationStage,
 }
 
 #[derive(Debug)]
@@ -112,7 +131,7 @@ struct FinalizedReservation {
 struct LedgerState {
     project: AccountBudget,
     users: HashMap<String, AccountBudget>,
-    reservations: HashMap<String, PromptReservation>,
+    reservations: HashMap<String, RequestReservation>,
     finalized_reservations: HashMap<String, FinalizedReservation>,
 }
 
@@ -155,9 +174,53 @@ impl BudgetLedger {
         project_budget_limit: f64,
         user_budget_limit: f64,
     ) -> Result<BudgetSnapshot, BudgetError> {
-        validate_amount(amount)?;
+        self.reserve_request(
+            request_id,
+            user_id,
+            amount,
+            0.0,
+            false,
+            project_budget_limit,
+            user_budget_limit,
+        )
+    }
+
+    pub fn reserve_non_stream_request(
+        &self,
+        request_id: &str,
+        user_id: &str,
+        prompt_amount: f64,
+        maximum_output_amount: f64,
+        project_budget_limit: f64,
+        user_budget_limit: f64,
+    ) -> Result<BudgetSnapshot, BudgetError> {
+        self.reserve_request(
+            request_id,
+            user_id,
+            prompt_amount,
+            maximum_output_amount,
+            true,
+            project_budget_limit,
+            user_budget_limit,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn reserve_request(
+        &self,
+        request_id: &str,
+        user_id: &str,
+        prompt_amount: f64,
+        output_amount: f64,
+        non_streaming: bool,
+        project_budget_limit: f64,
+        user_budget_limit: f64,
+    ) -> Result<BudgetSnapshot, BudgetError> {
+        validate_amount(prompt_amount)?;
+        validate_amount(output_amount)?;
         validate_budget_limit(project_budget_limit, BudgetScope::Project)?;
         validate_budget_limit(user_budget_limit, BudgetScope::User)?;
+        let total_amount = checked_add(prompt_amount, output_amount)?;
 
         let mut state = self.lock();
         if state.reservations.contains_key(request_id) {
@@ -167,7 +230,7 @@ impl BudgetLedger {
             return Err(BudgetError::ReservationAlreadyFinalized);
         }
 
-        let new_project_reserved = checked_add(state.project.reserved_spend, amount)?;
+        let new_project_reserved = checked_add(state.project.reserved_spend, total_amount)?;
         let new_project_total = checked_add(state.project.committed_spend, new_project_reserved)?;
         if new_project_total > project_budget_limit {
             return Err(BudgetError::BudgetExceeded(BudgetScope::Project));
@@ -176,7 +239,7 @@ impl BudgetLedger {
         let user = state.users.get(user_id);
         let current_user_committed = user.map_or(0.0, |account| account.committed_spend);
         let current_user_reserved = user.map_or(0.0, |account| account.reserved_spend);
-        let new_user_reserved = checked_add(current_user_reserved, amount)?;
+        let new_user_reserved = checked_add(current_user_reserved, total_amount)?;
         let new_user_total = checked_add(current_user_committed, new_user_reserved)?;
         if new_user_total > user_budget_limit {
             return Err(BudgetError::BudgetExceeded(BudgetScope::User));
@@ -190,11 +253,15 @@ impl BudgetLedger {
             .reserved_spend = new_user_reserved;
         state.reservations.insert(
             request_id.to_string(),
-            PromptReservation {
+            RequestReservation {
                 user_id: user_id.to_string(),
-                amount,
+                prompt_amount,
+                output_amount,
+                non_streaming,
+                stage: ReservationStage::AwaitingAcceptance,
             },
         );
+        debug_assert_invariants(&state);
         Ok(state.snapshot_for_user(user_id))
     }
 
@@ -209,8 +276,11 @@ impl BudgetLedger {
                 return Err(BudgetError::ReservationUserMismatch);
             }
             return match finalized.finalization {
-                Finalization::Committed => Ok(state.snapshot_for_user(user_id)),
+                Finalization::StreamingCommitted => Ok(state.snapshot_for_user(user_id)),
                 Finalization::Released => Err(BudgetError::ReservationAlreadyFinalized),
+                Finalization::NonStreamSettled { .. } | Finalization::NonStreamConservative => {
+                    Err(BudgetError::InvalidReservationTransition)
+                }
             };
         }
 
@@ -221,7 +291,10 @@ impl BudgetLedger {
         if reservation.user_id != user_id {
             return Err(BudgetError::ReservationUserMismatch);
         }
-        let amount = reservation.amount;
+        if reservation.stage != ReservationStage::AwaitingAcceptance || reservation.non_streaming {
+            return Err(BudgetError::InvalidReservationTransition);
+        }
+        let amount = reservation.prompt_amount;
         let new_project_committed = checked_add(state.project.committed_spend, amount)?;
         let user_committed = state
             .users
@@ -254,9 +327,10 @@ impl BudgetLedger {
             request_id.to_string(),
             FinalizedReservation {
                 user_id: user_id.to_string(),
-                finalization: Finalization::Committed,
+                finalization: Finalization::StreamingCommitted,
             },
         );
+        debug_assert_invariants(&state);
         Ok(state.snapshot_for_user(user_id))
     }
 
@@ -272,7 +346,11 @@ impl BudgetLedger {
             }
             return match finalized.finalization {
                 Finalization::Released => Ok(state.snapshot_for_user(user_id)),
-                Finalization::Committed => Err(BudgetError::ReservationAlreadyFinalized),
+                Finalization::StreamingCommitted
+                | Finalization::NonStreamSettled { .. }
+                | Finalization::NonStreamConservative => {
+                    Err(BudgetError::ReservationAlreadyFinalized)
+                }
             };
         }
 
@@ -283,7 +361,10 @@ impl BudgetLedger {
         if reservation.user_id != user_id {
             return Err(BudgetError::ReservationUserMismatch);
         }
-        let amount = reservation.amount;
+        if reservation.stage != ReservationStage::AwaitingAcceptance {
+            return Err(BudgetError::InvalidReservationTransition);
+        }
+        let amount = checked_add(reservation.prompt_amount, reservation.output_amount)?;
         let last_project_reservation = state.reservations.len() == 1;
         let last_user_reservation = !state
             .reservations
@@ -310,6 +391,194 @@ impl BudgetLedger {
                 finalization: Finalization::Released,
             },
         );
+        debug_assert_invariants(&state);
+        Ok(state.snapshot_for_user(user_id))
+    }
+
+    pub fn accept_non_stream_prompt(
+        &self,
+        request_id: &str,
+        user_id: &str,
+    ) -> Result<BudgetSnapshot, BudgetError> {
+        let mut state = self.lock();
+        if let Some(finalized) = state.finalized_reservations.get(request_id) {
+            if finalized.user_id != user_id {
+                return Err(BudgetError::ReservationUserMismatch);
+            }
+            return Err(BudgetError::ReservationAlreadyFinalized);
+        }
+
+        let reservation = state
+            .reservations
+            .get(request_id)
+            .ok_or(BudgetError::ReservationNotFound)?;
+        if reservation.user_id != user_id {
+            return Err(BudgetError::ReservationUserMismatch);
+        }
+        if !reservation.non_streaming {
+            return Err(BudgetError::InvalidReservationTransition);
+        }
+        if reservation.stage == ReservationStage::NonStreamAccepted {
+            return Ok(state.snapshot_for_user(user_id));
+        }
+
+        let prompt_amount = reservation.prompt_amount;
+        let new_project_committed = checked_add(state.project.committed_spend, prompt_amount)?;
+        let user_committed = state
+            .users
+            .get(user_id)
+            .ok_or(BudgetError::ReservationNotFound)?
+            .committed_spend;
+        let new_user_committed = checked_add(user_committed, prompt_amount)?;
+
+        state.project.reserved_spend -= prompt_amount;
+        state.project.committed_spend = new_project_committed;
+        let user = state
+            .users
+            .get_mut(user_id)
+            .ok_or(BudgetError::ReservationNotFound)?;
+        user.reserved_spend -= prompt_amount;
+        user.committed_spend = new_user_committed;
+        state
+            .reservations
+            .get_mut(request_id)
+            .expect("reservation was checked above")
+            .stage = ReservationStage::NonStreamAccepted;
+        debug_assert_invariants(&state);
+        Ok(state.snapshot_for_user(user_id))
+    }
+
+    pub fn settle_non_stream_output(
+        &self,
+        request_id: &str,
+        user_id: &str,
+        actual_output_amount: f64,
+    ) -> Result<BudgetSnapshot, BudgetError> {
+        validate_amount(actual_output_amount)?;
+        let mut state = self.lock();
+        if let Some(finalized) = state.finalized_reservations.get(request_id) {
+            if finalized.user_id != user_id {
+                return Err(BudgetError::ReservationUserMismatch);
+            }
+            return match finalized.finalization {
+                Finalization::NonStreamSettled { output_amount }
+                    if output_amount == actual_output_amount =>
+                {
+                    Ok(state.snapshot_for_user(user_id))
+                }
+                Finalization::NonStreamSettled { .. }
+                | Finalization::NonStreamConservative
+                | Finalization::StreamingCommitted
+                | Finalization::Released => Err(BudgetError::ReservationAlreadyFinalized),
+            };
+        }
+
+        let reservation = state
+            .reservations
+            .get(request_id)
+            .ok_or(BudgetError::ReservationNotFound)?;
+        if reservation.user_id != user_id {
+            return Err(BudgetError::ReservationUserMismatch);
+        }
+        if reservation.stage != ReservationStage::NonStreamAccepted {
+            return Err(BudgetError::InvalidReservationTransition);
+        }
+        if actual_output_amount > reservation.output_amount {
+            return Err(BudgetError::OutputExceedsReservation);
+        }
+        let output_reservation = reservation.output_amount;
+        let new_project_committed =
+            checked_add(state.project.committed_spend, actual_output_amount)?;
+        let user_committed = state
+            .users
+            .get(user_id)
+            .ok_or(BudgetError::ReservationNotFound)?
+            .committed_spend;
+        let new_user_committed = checked_add(user_committed, actual_output_amount)?;
+
+        state.reservations.remove(request_id);
+        state.project.reserved_spend -= output_reservation;
+        state.project.committed_spend = new_project_committed;
+        let user = state
+            .users
+            .get_mut(user_id)
+            .ok_or(BudgetError::ReservationNotFound)?;
+        user.reserved_spend -= output_reservation;
+        user.committed_spend = new_user_committed;
+        state.finalized_reservations.insert(
+            request_id.to_string(),
+            FinalizedReservation {
+                user_id: user_id.to_string(),
+                finalization: Finalization::NonStreamSettled {
+                    output_amount: actual_output_amount,
+                },
+            },
+        );
+        normalize_empty_reservations(&mut state, user_id);
+        debug_assert_invariants(&state);
+        Ok(state.snapshot_for_user(user_id))
+    }
+
+    pub fn finalize_unknown_output_conservatively(
+        &self,
+        request_id: &str,
+        user_id: &str,
+    ) -> Result<BudgetSnapshot, BudgetError> {
+        let mut state = self.lock();
+        if let Some(finalized) = state.finalized_reservations.get(request_id) {
+            if finalized.user_id != user_id {
+                return Err(BudgetError::ReservationUserMismatch);
+            }
+            return match finalized.finalization {
+                Finalization::NonStreamConservative => Ok(state.snapshot_for_user(user_id)),
+                Finalization::NonStreamSettled { .. }
+                | Finalization::StreamingCommitted
+                | Finalization::Released => Err(BudgetError::ReservationAlreadyFinalized),
+            };
+        }
+
+        let reservation = state
+            .reservations
+            .get(request_id)
+            .ok_or(BudgetError::ReservationNotFound)?;
+        if reservation.user_id != user_id {
+            return Err(BudgetError::ReservationUserMismatch);
+        }
+        if !reservation.non_streaming {
+            return Err(BudgetError::InvalidReservationTransition);
+        }
+        let reserved_amount = match reservation.stage {
+            ReservationStage::AwaitingAcceptance => {
+                checked_add(reservation.prompt_amount, reservation.output_amount)?
+            }
+            ReservationStage::NonStreamAccepted => reservation.output_amount,
+        };
+        let new_project_committed = checked_add(state.project.committed_spend, reserved_amount)?;
+        let user_committed = state
+            .users
+            .get(user_id)
+            .ok_or(BudgetError::ReservationNotFound)?
+            .committed_spend;
+        let new_user_committed = checked_add(user_committed, reserved_amount)?;
+
+        state.reservations.remove(request_id);
+        state.project.reserved_spend -= reserved_amount;
+        state.project.committed_spend = new_project_committed;
+        let user = state
+            .users
+            .get_mut(user_id)
+            .ok_or(BudgetError::ReservationNotFound)?;
+        user.reserved_spend -= reserved_amount;
+        user.committed_spend = new_user_committed;
+        state.finalized_reservations.insert(
+            request_id.to_string(),
+            FinalizedReservation {
+                user_id: user_id.to_string(),
+                finalization: Finalization::NonStreamConservative,
+            },
+        );
+        normalize_empty_reservations(&mut state, user_id);
+        debug_assert_invariants(&state);
         Ok(state.snapshot_for_user(user_id))
     }
 
@@ -346,6 +615,7 @@ impl BudgetLedger {
             .entry(user_id.to_string())
             .or_default()
             .committed_spend = new_user_committed;
+        debug_assert_invariants(&state);
         Ok(state.snapshot_for_user(user_id))
     }
 
@@ -375,6 +645,69 @@ impl BudgetLedger {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
+}
+
+fn normalize_empty_reservations(state: &mut LedgerState, user_id: &str) {
+    if state.reservations.is_empty() {
+        state.project.reserved_spend = 0.0;
+    }
+    if !state
+        .reservations
+        .values()
+        .any(|reservation| reservation.user_id == user_id)
+        && let Some(user) = state.users.get_mut(user_id)
+    {
+        user.reserved_spend = 0.0;
+    }
+}
+
+#[cfg(debug_assertions)]
+fn debug_assert_invariants(state: &LedgerState) {
+    let expected_project_reserved = state
+        .reservations
+        .values()
+        .map(|reservation| match reservation.stage {
+            ReservationStage::AwaitingAcceptance => {
+                reservation.prompt_amount + reservation.output_amount
+            }
+            ReservationStage::NonStreamAccepted => reservation.output_amount,
+        })
+        .sum::<f64>();
+    debug_assert!(
+        amounts_are_close(state.project.reserved_spend, expected_project_reserved),
+        "project reserved spend diverged from active reservations"
+    );
+    debug_assert!(state.project.committed_spend >= 0.0);
+    debug_assert!(state.project.reserved_spend >= 0.0);
+
+    for (user_id, account) in &state.users {
+        let expected_user_reserved = state
+            .reservations
+            .values()
+            .filter(|reservation| reservation.user_id == *user_id)
+            .map(|reservation| match reservation.stage {
+                ReservationStage::AwaitingAcceptance => {
+                    reservation.prompt_amount + reservation.output_amount
+                }
+                ReservationStage::NonStreamAccepted => reservation.output_amount,
+            })
+            .sum::<f64>();
+        debug_assert!(
+            amounts_are_close(account.reserved_spend, expected_user_reserved),
+            "user reserved spend diverged from active reservations"
+        );
+        debug_assert!(account.committed_spend >= 0.0);
+        debug_assert!(account.reserved_spend >= 0.0);
+    }
+}
+
+#[cfg(not(debug_assertions))]
+fn debug_assert_invariants(_state: &LedgerState) {}
+
+#[cfg(debug_assertions)]
+fn amounts_are_close(left: f64, right: f64) -> bool {
+    let scale = left.abs().max(right.abs()).max(1.0);
+    (left - right).abs() <= f64::EPSILON * scale * 16.0
 }
 
 fn validate_amount(amount: f64) -> Result<(), BudgetError> {
@@ -528,6 +861,134 @@ mod tests {
         );
         assert_eq!(ledger.user_snapshot("user").committed_spend, 0.25);
         assert_eq!(ledger.project_snapshot().committed_spend, 0.25);
+    }
+
+    #[test]
+    fn non_stream_reservation_acceptance_and_settlement_are_atomic() {
+        let ledger = BudgetLedger::new();
+        let reserved = ledger
+            .reserve_non_stream_request("request", "user", 0.2, 0.8, 2.0, 1.0)
+            .expect("combined reservation should succeed");
+        assert_account(reserved.project, 0.0, 1.0, 1.0);
+        assert_account(reserved.user, 0.0, 1.0, 1.0);
+
+        let accepted = ledger
+            .accept_non_stream_prompt("request", "user")
+            .expect("acceptance should commit only prompt");
+        assert_account(accepted.project, 0.2, 0.8, 1.0);
+        assert_account(accepted.user, 0.2, 0.8, 1.0);
+        assert_eq!(
+            ledger
+                .accept_non_stream_prompt("request", "user")
+                .expect("repeated acceptance should be idempotent"),
+            accepted
+        );
+
+        let settled = ledger
+            .settle_non_stream_output("request", "user", 0.3)
+            .expect("known output should settle");
+        assert_account(settled.project, 0.5, 0.0, 0.5);
+        assert_account(settled.user, 0.5, 0.0, 0.5);
+        assert_eq!(
+            ledger
+                .settle_non_stream_output("request", "user", 0.3)
+                .expect("same settlement should be idempotent"),
+            settled
+        );
+        assert_eq!(
+            ledger.settle_non_stream_output("request", "user", 0.4),
+            Err(BudgetError::ReservationAlreadyFinalized)
+        );
+        assert_eq!(
+            ledger.finalize_unknown_output_conservatively("request", "user"),
+            Err(BudgetError::ReservationAlreadyFinalized)
+        );
+    }
+
+    #[test]
+    fn non_stream_pre_acceptance_release_and_conservative_finalization_are_idempotent() {
+        let ledger = BudgetLedger::new();
+        ledger
+            .reserve_non_stream_request("released", "user", 0.2, 0.8, 2.0, 2.0)
+            .expect("reservation should succeed");
+        let released = ledger
+            .release_prompt("released", "user")
+            .expect("pre-acceptance release should succeed");
+        assert_account(released.user, 0.0, 0.0, 0.0);
+        assert_eq!(
+            ledger.accept_non_stream_prompt("released", "user"),
+            Err(BudgetError::ReservationAlreadyFinalized)
+        );
+
+        ledger
+            .reserve_non_stream_request("unknown-output", "user", 0.2, 0.8, 2.0, 2.0)
+            .expect("reservation should succeed");
+        ledger
+            .accept_non_stream_prompt("unknown-output", "user")
+            .expect("acceptance should succeed");
+        let conservative = ledger
+            .finalize_unknown_output_conservatively("unknown-output", "user")
+            .expect("unknown output should commit full reservation");
+        assert_account(conservative.user, 1.0, 0.0, 1.0);
+        assert_eq!(
+            ledger
+                .finalize_unknown_output_conservatively("unknown-output", "user")
+                .expect("conservative finalization should be idempotent"),
+            conservative
+        );
+        assert_eq!(
+            ledger.release_prompt("unknown-output", "user"),
+            Err(BudgetError::ReservationAlreadyFinalized)
+        );
+    }
+
+    #[test]
+    fn output_exceeding_non_stream_reservation_does_not_mutate_then_finalizes_safely() {
+        let ledger = BudgetLedger::new();
+        ledger
+            .reserve_non_stream_request("request", "user", 0.2, 0.3, 0.5, 0.5)
+            .expect("reservation at both limits should succeed");
+        ledger
+            .accept_non_stream_prompt("request", "user")
+            .expect("acceptance should succeed");
+        let before = ledger.user_snapshot("user");
+        assert_eq!(
+            ledger.settle_non_stream_output("request", "user", 0.31),
+            Err(BudgetError::OutputExceedsReservation)
+        );
+        assert_eq!(ledger.user_snapshot("user"), before);
+        let finalized = ledger
+            .finalize_unknown_output_conservatively("request", "user")
+            .expect("full reserved output should commit");
+        assert_account(finalized.project, 0.5, 0.0, 0.5);
+        assert_account(finalized.user, 0.5, 0.0, 0.5);
+    }
+
+    #[test]
+    fn non_stream_lifecycle_rejects_wrong_users_and_invalid_transitions() {
+        let ledger = BudgetLedger::new();
+        ledger
+            .reserve_non_stream_request("request", "owner", 0.2, 0.3, 1.0, 1.0)
+            .expect("reservation should succeed");
+        assert_eq!(
+            ledger.accept_non_stream_prompt("request", "other"),
+            Err(BudgetError::ReservationUserMismatch)
+        );
+        assert_eq!(
+            ledger.settle_non_stream_output("request", "owner", 0.1),
+            Err(BudgetError::InvalidReservationTransition)
+        );
+        ledger
+            .accept_non_stream_prompt("request", "owner")
+            .expect("acceptance should succeed");
+        assert_eq!(
+            ledger.release_prompt("request", "owner"),
+            Err(BudgetError::InvalidReservationTransition)
+        );
+        assert_eq!(
+            ledger.settle_non_stream_output("unknown", "owner", 0.1),
+            Err(BudgetError::ReservationNotFound)
+        );
     }
 
     #[test]
@@ -827,6 +1288,42 @@ mod tests {
         assert_eq!(successes, 10);
         assert!(ledger.project_snapshot().total_spend <= 1.0);
         assert!(ledger.user_snapshot("user").total_spend <= 1.0);
+    }
+
+    #[test]
+    fn concurrent_non_stream_reservations_never_exceed_either_budget() {
+        const ATTEMPTS: usize = 32;
+        let ledger = Arc::new(BudgetLedger::new());
+        let barrier = Arc::new(Barrier::new(ATTEMPTS));
+        let handles: Vec<_> = (0..ATTEMPTS)
+            .map(|index| {
+                let ledger = Arc::clone(&ledger);
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    ledger.reserve_non_stream_request(
+                        &format!("non-stream-{index}"),
+                        &format!("user-{}", index % 4),
+                        0.01,
+                        0.09,
+                        1.0,
+                        0.3,
+                    )
+                })
+            })
+            .collect();
+
+        let successes = handles
+            .into_iter()
+            .map(|handle| handle.join().expect("reservation thread should not panic"))
+            .filter(Result::is_ok)
+            .count();
+        let project = ledger.project_snapshot();
+        assert!(project.total_spend <= 1.0);
+        assert!((project.reserved_spend - successes as f64 * 0.1).abs() < 1e-12);
+        for index in 0..4 {
+            assert!(ledger.user_snapshot(&format!("user-{index}")).total_spend <= 0.3);
+        }
     }
 
     #[test]

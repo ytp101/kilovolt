@@ -128,6 +128,8 @@ class KilovoltProcess:
                 "KILOVOLT_MAX_REQUEST_BODY_BYTES": str(1024 * 1024),
                 "KILOVOLT_MAX_UPSTREAM_BODY_BYTES": str(4 * 1024 * 1024),
                 "KILOVOLT_MAX_SSE_FRAME_BYTES": str(256 * 1024),
+                "KILOVOLT_ENABLE_MOCK_UPSTREAM": "true",
+                "KILOVOLT_NON_STREAM_DEFAULT_MAX_OUTPUT_TOKENS": "4096",
                 "RUST_LOG": "kilovolt=error",
             }
         )

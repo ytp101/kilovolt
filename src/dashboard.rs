@@ -1,4 +1,4 @@
-use crate::config::{AppState, RecentRequest};
+use crate::config::{AppState, RecentRequest, secrets_match};
 use axum::{
     Json,
     extract::State,
@@ -14,6 +14,7 @@ use std::sync::atomic::Ordering;
 struct StatsPayload {
     health: HealthStats,
     budget: BudgetStats,
+    ledger: LedgerMetadata,
 }
 
 #[derive(serde::Serialize)]
@@ -31,6 +32,14 @@ struct BudgetStats {
     default_budget_usd: f64,
     recent_requests: Vec<RecentRequest>,
     current_spend_by_user: HashMap<String, f64>,
+}
+
+#[derive(serde::Serialize)]
+struct LedgerMetadata {
+    persistence: &'static str,
+    scope: &'static str,
+    restart_resets_spend: bool,
+    multi_instance_safe: bool,
 }
 
 /// Helper function to retrieve RSS memory usage of the current process on Linux.
@@ -52,21 +61,6 @@ fn get_memory_usage_kb() -> usize {
     }
     // Fallback/mock RSS memory usage (e.g. 15MB) when running locally on macOS
     15360
-}
-
-fn secrets_match(expected: &str, actual: &str) -> bool {
-    if expected.len() != actual.len() {
-        return false;
-    }
-
-    expected
-        .as_bytes()
-        .iter()
-        .zip(actual.as_bytes())
-        .fold(0_u8, |difference, (left, right)| {
-            difference | (left ^ right)
-        })
-        == 0
 }
 
 fn dashboard_auth_failure(state: &AppState, headers: &HeaderMap) -> Option<Response> {
@@ -164,6 +158,12 @@ pub async fn get_stats(State(state): State<AppState>, headers: HeaderMap) -> Res
             recent_requests: recent,
             current_spend_by_user: ledger,
         },
+        ledger: LedgerMetadata {
+            persistence: "memory",
+            scope: "process",
+            restart_resets_spend: true,
+            multi_instance_safe: false,
+        },
     };
 
     (StatusCode::OK, Json(payload)).into_response()
@@ -218,6 +218,10 @@ const DASHBOARD_HTML: &str = r#"<!DOCTYPE html>
     </header>
 
     <main class="flex-grow max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-8">
+        <div class="rounded-xl border border-amber-700/60 bg-amber-950/30 px-4 py-3 text-sm text-amber-200">
+            <strong>Process-local ledger:</strong>
+            spend resets on restart and multiple instances do not share one budget.
+        </div>
         <!-- Stats Overview Grid -->
         <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
             <!-- Card: System Health -->
@@ -414,6 +418,8 @@ mod tests {
     use axum::extract::State;
     use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
     use base64::{Engine as _, engine::general_purpose::STANDARD};
+    use http_body_util::BodyExt;
+    use std::sync::Arc;
 
     use crate::config::test_state;
 
@@ -452,6 +458,36 @@ mod tests {
 
         assert_eq!(dashboard.status(), StatusCode::OK);
         assert_eq!(stats.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn authenticated_stats_expose_process_local_ledger_metadata() {
+        let state = test_state(0, 1.0);
+        let response = get_stats(State(state), bearer_headers("test-dashboard-token")).await;
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(json["ledger"]["persistence"], "memory");
+        assert_eq!(json["ledger"]["scope"], "process");
+        assert_eq!(json["ledger"]["restart_resets_spend"], true);
+        assert_eq!(json["ledger"]["multi_instance_safe"], false);
+    }
+
+    #[tokio::test]
+    async fn dashboard_and_proxy_credentials_are_independent() {
+        let mut state = test_state(0, 1.0);
+        state.proxy_token = Some(Arc::from("proxy-only-secret"));
+        assert_eq!(
+            get_stats(State(state.clone()), bearer_headers("proxy-only-secret"))
+                .await
+                .status(),
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            get_stats(State(state), bearer_headers("test-dashboard-token"))
+                .await
+                .status(),
+            StatusCode::OK
+        );
     }
 
     #[tokio::test]

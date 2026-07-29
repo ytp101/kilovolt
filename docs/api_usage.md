@@ -23,6 +23,9 @@ Authorization: Bearer <provider credential>
 Content-Type: application/json
 ```
 
+When configured, `X-Kilovolt-Key` is also required. It is checked before body
+parsing and is not forwarded to a real upstream.
+
 Recommended trusted identity header:
 
 ```text
@@ -50,8 +53,9 @@ curl --no-buffer \
 ```
 
 A successful compatible upstream must return `text/event-stream`. Kilovolt
-reconstructs and validates bounded events, charges supported text before
-forwarding each event, and recognizes `[DONE]`. If a later charge is rejected,
+reconstructs and validates bounded events, charges supported
+text/refusal/function/tool fields before forwarding each event, and recognizes
+`[DONE]`. Unknown non-empty generated fields terminate forwarding. If a later charge is rejected,
 the already-sent HTTP status stays `200`, forwarding stops, and the local
 request record is `429`.
 
@@ -62,14 +66,17 @@ curl \
   -H "Authorization: Bearer ${OPENAI_API_KEY}" \
   -H 'Content-Type: application/json' \
   -H 'X-User-ID: user-42' \
-  --data '{"model":"gpt-4o-mini","messages":[{"role":"user","content":"Hello"}],"stream":false}' \
+  --data '{"model":"gpt-4o-mini","messages":[{"role":"user","content":"Hello"}],"stream":false,"max_completion_tokens":100}' \
   http://127.0.0.1:8080/v1/chat/completions
 ```
 
-A successful upstream must return bounded `application/json`. Kilovolt uses
-supported integer `usage.completion_tokens` or tokenizes complete supported
-message content as fallback, charges the output, then returns the original JSON
-bytes.
+A positive maximum is selected from `max_completion_tokens`, legacy
+`max_tokens`, or the configured default; otherwise the request fails before
+upstream. Kilovolt atomically reserves prompt plus maximum output. A successful
+upstream must return bounded `application/json`. Trusted integer
+`usage.completion_tokens` or a supported complete message estimate settles
+actual output and releases the rest. Unknown post-acceptance cost commits the
+full output reservation and withholds the response.
 
 Gemini translation requires `stream=true`.
 
@@ -90,7 +97,7 @@ Kilovolt-generated errors use:
 
 | Status | Meaning |
 |---:|---|
-| `400` | Invalid request headers/JSON or unsupported response mode. |
+| `400` | Invalid request, missing output bound, unknown pricing, or unsupported response mode. |
 | `401` | Missing/malformed proxy authorization or dashboard authentication. |
 | `413` | Request body exceeded the configured maximum. |
 | `429` | Token gate, project budget, or user budget rejected the next operation. |
@@ -100,7 +107,7 @@ Kilovolt-generated errors use:
 | `504` | Upstream response headers timed out. |
 
 Non-success upstream statuses and bounded bodies are preserved. They release
-the prompt reservation.
+all pre-acceptance reservations.
 
 ## Dashboard routes
 
@@ -114,6 +121,7 @@ curl -H "Authorization: Bearer ${KILOVOLT_DASHBOARD_TOKEN}" \
 
 ## Test-only mock
 
-`POST /mock/v1/chat/completions` returns deterministic streaming or JSON output.
-`X-Mock-Upstream: true` routes the main proxy to it. `X-Mock-Events` and
-`X-Mock-Delay-Ms` control bounded mock behavior. Keep this route private.
+Only `KILOVOLT_ENABLE_MOCK_UPSTREAM=true` enables
+`POST /mock/v1/chat/completions` and `X-Mock-Upstream: true`.
+`X-Mock-Events` and `X-Mock-Delay-Ms` control bounded mock behavior. Configured
+proxy authentication applies. Use this only for local tests and benchmarks.

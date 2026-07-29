@@ -9,7 +9,7 @@ implicit application project.
 ```mermaid
 flowchart LR
     C["Browser or mobile client"] -->|"authenticated application request"| B["Founder's backend"]
-    B -->|"Bearer provider key + trusted X-User-ID"| K["Kilovolt"]
+    B -->|"Bearer provider key + optional X-Kilovolt-Key + trusted X-User-ID"| K["Kilovolt"]
     K -->|"OpenAI-compatible or translated request"| P["AI provider"]
     K --> D["Local customer dashboard"]
     K -. "only when explicitly enabled" .-> T["Kilovolt company telemetry endpoint"]
@@ -21,36 +21,39 @@ untrusted browser or mobile client.
 
 ## Proxy lifecycle
 
-1. Validate `Authorization` and `Content-Type`.
+1. Validate the optional `X-Kilovolt-Key` before reading the body or reserving
+   money, then validate `Authorization` and `Content-Type`.
 2. Read at most `KILOVOLT_MAX_REQUEST_BODY_BYTES`.
 3. Parse the supported chat-completions fields and estimate prompt tokens.
 4. Check optional token gates.
-5. Atomically reserve the calculated prompt cost against both the project and
-   user accounts.
-6. Send the request upstream and wait no longer than
+5. Resolve a known configured price. Unknown pricing fails before upstream.
+6. Atomically reserve prompt cost for streaming, or prompt plus the selected
+   maximum output cost for non-streaming, against both accounts.
+7. Send the request upstream and wait no longer than
    `KILOVOLT_UPSTREAM_HEADER_TIMEOUT_SECONDS` for response headers.
-7. Release the prompt reservation for a connection failure, header timeout, or
-   upstream non-success response.
-8. Commit the prompt reservation after a successful upstream HTTP response.
-9. Process the body as bounded SSE when `stream=true`, or bounded JSON when
+8. Release every reservation for a pre-acceptance connection failure, timeout,
+   or upstream non-success response.
+9. After successful headers, commit prompt cost. Non-streaming maximum output
+   remains reserved.
+10. Process the body as bounded SSE when `stream=true`, or bounded JSON when
    `stream=false`.
-10. Record local operational statistics when the request finishes.
+11. Settle known non-stream output and release unused reservation, or commit the
+    full output reservation when post-acceptance cost becomes unknowable.
+12. Record local operational statistics when the request finishes.
 
 ```mermaid
 stateDiagram-v2
-    [*] --> Reserved: prompt fits project and user limits
-    Reserved --> Released: failure before successful acceptance
-    Reserved --> Committed: upstream success status
-    Reserved --> Released: handler cancelled before acceptance
-    Committed --> Streaming: SSE response
-    Committed --> JSON: non-streaming response
+    [*] --> Reserved: stream prompt or non-stream prompt + max output fits both limits
+    Reserved --> Released: pre-acceptance failure or cancellation
+    Reserved --> StreamingCommitted: streaming success headers
+    Reserved --> NonStreamAccepted: non-stream success headers; prompt committed
+    StreamingCommitted --> Streaming: SSE response
+    NonStreamAccepted --> Settled: known actual output committed; unused output released
+    NonStreamAccepted --> Conservative: unknown/invalid output; full output committed
     Streaming --> Completed
     Streaming --> Cutoff: next output charge rejected
     Streaming --> Failed: malformed or disconnected upstream
     Streaming --> Cancelled: downstream body dropped
-    JSON --> Completed: output charge accepted
-    JSON --> Cutoff: output charge rejected
-    JSON --> Failed: invalid or oversized response
 ```
 
 Normal lifecycle transitions are idempotent. Repeating the same commit or
@@ -78,12 +81,16 @@ events split across many chunks, and a valid final event without a trailing
 blank line. Invalid UTF-8, invalid fields, malformed JSON data, or an oversized
 frame terminates forwarding and records a `502`.
 
-OpenAI-compatible `choices[].delta.content` text is tokenized per complete SSE
-event. Per-event token counts are not identical to tokenizing the complete
-answer once because BPE merges can cross provider event boundaries. The tested
-case over-counts when split; Kilovolt intentionally keeps this bounded,
-conservative approximation. It is not provider-invoice equivalence, and
-unsupported tool/function payloads are not currently accounted.
+OpenAI-compatible supported generated fields are converted to a deterministic
+canonical representation per event before charging. These include content,
+refusal, legacy function calls, tool-call IDs/types/names/arguments, and
+supported structured assistant content. Plain text retains the compatible
+text-only path. A non-empty unknown generated field terminates the stream with
+an accounting-protocol failure and is not forwarded.
+
+Per-event token counts are not identical to tokenizing the complete answer once
+because BPE merges can cross provider event boundaries. This is a bounded local
+estimate, not provider-invoice equivalence.
 
 Each output increment is atomically charged before that frame is yielded. A
 rejected increment is neither charged nor forwarded. Because application-level
@@ -94,13 +101,20 @@ upstream acceptance.
 
 ## Non-streaming response path
 
-`stream=false` requires a successful JSON response no larger than
-`KILOVOLT_MAX_UPSTREAM_BODY_BYTES`. Kilovolt uses a non-negative integer
-`usage.completion_tokens` when present. Otherwise it tokenizes the complete
-supported `choices[].message.content` value once. The JSON bytes are returned
-unchanged only after the output charge succeeds. A response whose output charge
-would exceed a budget is withheld with `429`; its already-consumed prompt
-remains committed.
+`stream=false` must select a positive output maximum from
+`max_completion_tokens`, then `max_tokens`, then the configured default. The
+request is rejected before upstream if none exists. Prompt plus maximum output
+cost is reserved atomically.
+
+After successful headers, prompt is committed while output remains reserved.
+Kilovolt uses non-negative integer `usage.completion_tokens` when present;
+otherwise it tokenizes supported complete content/refusal/function/tool fields.
+Known actual cost is committed and unused output capacity released atomically.
+If usage exceeds the bound, the body is malformed/unsupported/oversized, reading
+fails, the client cancels, or another post-acceptance failure makes cost unknown,
+the entire maximum output reservation is committed conservatively and the
+provider response is withheld. The provider invoice can still exceed the
+internal reservation if the provider ignored the transmitted maximum.
 
 Gemini translation is streaming-only. A Gemini request with `stream=false` is
 rejected before reservation.
@@ -122,6 +136,9 @@ dashboard do not provide data to the customer dashboard.
 - Financial and token state is in memory and resets on restart.
 - Each process has an independent project ledger. Multiple replicas do not
   provide a shared budget and can collectively exceed the intended limit.
+- Non-loopback startup requires explicit acknowledgement of these properties,
+  plus proxy authentication or an explicit unsafe override. This prevents
+  accidental exposure; it does not add persistence or replica coordination.
 - No database, distributed lock, or cloud multi-tenancy is implemented.
 - Finalized request IDs remain in memory for the lifetime of the process.
 - Optional daily and pipeline token gates do not use the financial ledger's

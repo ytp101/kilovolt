@@ -34,7 +34,7 @@ for user in alice bob carol; do
     -H "Authorization: Bearer ${OPENAI_API_KEY}" \
     -H 'Content-Type: application/json' \
     -H "X-User-ID: ${user}" \
-    --data '{"model":"gpt-4o-mini","messages":[{"role":"user","content":"Reply OK"}],"stream":false}' \
+    --data '{"model":"gpt-4o-mini","messages":[{"role":"user","content":"Reply OK"}],"stream":false,"max_completion_tokens":32}' \
     http://127.0.0.1:8080/v1/chat/completions
 done
 ```

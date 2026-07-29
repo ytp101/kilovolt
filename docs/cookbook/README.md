@@ -23,6 +23,7 @@ export KILOVOLT_PORT=8080
 export KILOVOLT_PROJECT_BUDGET=25
 export KILOVOLT_DEFAULT_BUDGET=5
 export KILOVOLT_DASHBOARD_TOKEN="$(openssl rand -hex 32)"
+export KILOVOLT_PROXY_TOKEN="$(openssl rand -hex 32)"
 export KILOVOLT_TELEMETRY_ENABLED=false
 ```
 
@@ -42,6 +43,11 @@ Then use one of:
 - [Project budget](project-budget.md)
 - [Pipeline token gates](pipeline-budgets.md)
 - [Dashboard security](dashboard-security.md)
+- [Safe non-streaming requests](safe-non-streaming.md)
+- [Tool and function accounting](tool-accounting.md)
+- [Custom model pricing](custom-pricing.md)
+- [Proxy authentication](proxy-authentication.md)
+- [Single-process deployment](single-process-deployment.md)
 - [Docker deployment](docker-deployment.md)
 - [Local OpenAI-compatible provider](local-openai-compatible-provider.md)
 - [Troubleshooting](troubleshooting.md)

@@ -26,12 +26,20 @@ Raw evidence:
 - [`20260729-macos-arm64-run3.json`](../benchmark-results/20260729-macos-arm64-run3.json)
 - [`20260729-macos-arm64-pre-tokenizer-fix.json`](../benchmark-results/20260729-macos-arm64-pre-tokenizer-fix.json)
 - [`smoke.json`](../benchmark-results/smoke.json)
+- [`phase4-smoke.json`](../benchmark-results/phase4-smoke.json)
 
 Environment: 2026-07-29, Apple M4 (10 logical CPUs), 16 GiB RAM, macOS
 26.5.1 arm64, Rust recorded in the raw file, release profile, repository HEAD
 `88aefa4` with a dirty working tree. Because the Phase 3 changes were
 uncommitted, the commit alone does not reproduce the exact source; the raw file
 explicitly records `working_tree_dirty: true`.
+
+The Phase 4 smoke run explicitly enabled the otherwise-disabled embedded mock
+and configured a non-stream output default. It reported 10,368 KiB idle RSS;
+proxied-minus-direct p50 total latency of 0.041 ms (stream-c1), 0.755 ms
+(stream-c5), 0.070 ms (json-c1), 0.088 ms (json-c5), 0.524 ms (long-stream),
+and 2.276 ms (large-prompt). This short dirty-tree run is a regression signal,
+not a replacement for repeated full benchmarks.
 
 Ranges across three post-fix full runs:
 

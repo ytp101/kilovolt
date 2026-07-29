@@ -15,8 +15,12 @@ provider invoice or a guarantee against every unexpected bill.
 Implemented and tested:
 
 - atomic project and per-user prompt reservations and output charges;
+- bounded non-streaming prompt-plus-maximum-output reservations with atomic
+  settlement or conservative full-reservation finalization;
 - bounded OpenAI-compatible SSE reconstruction across arbitrary byte chunks;
-- bounded non-streaming JSON responses with usage/fallback accounting;
+- tool/function definitions, calls, refusal, and supported structured-content
+  accounting;
+- fail-closed, operator-overridable model pricing;
 - failure and cancellation-aware prompt lifecycle;
 - request, upstream-body, and SSE-frame limits;
 - authenticated local customer dashboard;
@@ -39,9 +43,11 @@ Known limitations:
   and may be stale;
 - streaming text is tokenized per SSE event, so it is a bounded conservative
   approximation rather than whole-answer/provider billing equivalence;
-- tool/function-call-only output is not fully accounted;
-- no proxy-route end-user authentication, rate limiting, or distributed
-  consistency is implemented.
+- locally estimated tokens and configured prices are not exact provider invoice
+  equivalence;
+- no end-user authentication, rate limiting, persistence, or distributed
+  consistency is implemented; optional proxy authentication protects the route,
+  while `X-User-ID` still relies on the founder backend.
 
 ## Supported routes
 
@@ -51,7 +57,7 @@ Known limitations:
 | `GET /health` | Public liveness response: `OK`. |
 | `GET /dashboard` | Authenticated local customer dashboard. |
 | `GET /api/stats` | Authenticated local JSON statistics. |
-| `POST /mock/v1/chat/completions` | Deterministic local test/benchmark upstream; do not expose publicly. |
+| `POST /mock/v1/chat/completions` | Disabled-by-default deterministic local test/benchmark upstream. |
 
 Gemini models are translated only when `stream=true`. Other provider families
 and API routes are not claimed.
@@ -66,6 +72,7 @@ export KILOVOLT_PORT=8080
 export KILOVOLT_PROJECT_BUDGET=25.00
 export KILOVOLT_DEFAULT_BUDGET=5.00
 export KILOVOLT_DASHBOARD_TOKEN="$(openssl rand -hex 32)"
+export KILOVOLT_PROXY_TOKEN="$(openssl rand -hex 32)"
 export KILOVOLT_TELEMETRY_ENABLED=false
 
 ./target/release/kilovolt
@@ -74,10 +81,15 @@ export KILOVOLT_TELEMETRY_ENABLED=false
 Test through the deterministic mock without a real provider key:
 
 ```bash
+# In the server terminal, restart with mock mode for local verification only:
+KILOVOLT_ENABLE_MOCK_UPSTREAM=true ./target/release/kilovolt
+
+# In another terminal:
 curl --no-buffer --fail \
   -H 'Authorization: Bearer mock-key' \
   -H 'Content-Type: application/json' \
   -H 'X-User-ID: local-test-user' \
+  -H "X-Kilovolt-Key: ${KILOVOLT_PROXY_TOKEN}" \
   -H 'X-Mock-Upstream: true' \
   --data '{
     "model":"gpt-4o-mini",
@@ -92,7 +104,7 @@ curl --no-buffer --fail \
 ```mermaid
 flowchart LR
     C["Untrusted browser/mobile client"] -->|"authenticated request"| B["Founder's backend"]
-    B -->|"provider credential + trusted X-User-ID"| K["Private Kilovolt"]
+    B -->|"provider credential + X-Kilovolt-Key + trusted X-User-ID"| K["Private Kilovolt"]
     K --> P["AI provider"]
 ```
 
@@ -112,6 +124,18 @@ export KILOVOLT_DEFAULT_BUDGET=5.00
 Every prompt reservation and output charge checks both levels under one ledger
 lock. A failed check leaves both unchanged. If the project variable is omitted,
 it falls back to `KILOVOLT_DEFAULT_BUDGET`.
+
+For `stream:false`, send a positive `max_completion_tokens` (preferred) or
+`max_tokens`, or configure `KILOVOLT_NON_STREAM_DEFAULT_MAX_OUTPUT_TOKENS`.
+Kilovolt reserves prompt plus maximum output cost before upstream contact,
+settles exact/provider-reported or supported locally estimated output afterward,
+and commits the full output reservation if cost becomes unknowable after
+provider acceptance. See [Safe non-streaming requests](docs/cookbook/safe-non-streaming.md).
+
+The default bind is loopback. Non-loopback startup requires
+`KILOVOLT_ACKNOWLEDGE_PROCESS_LOCAL_LEDGER=true` and a proxy token (or an
+explicit unsafe unauthenticated override). The acknowledgement does not make
+horizontal replicas safe: all spend is process-local and resets on restart.
 
 ## Dashboard
 

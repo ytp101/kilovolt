@@ -11,9 +11,10 @@ use std::time::Instant;
 use tiktoken_rs::{ChatCompletionRequestMessage, bpe_for_model, num_tokens_from_messages};
 use tracing::{error, info, warn};
 
-use crate::budget::{StreamMonitor, get_model_pricing};
-use crate::config::AppState;
+use crate::budget::StreamMonitor;
+use crate::config::{AppState, secrets_match};
 use crate::ledger::{BudgetError, BudgetScope, BudgetSnapshot};
+use crate::pricing::Provider;
 
 // Structs for incoming request body parsing
 #[derive(serde::Deserialize, Clone)]
@@ -23,6 +24,8 @@ struct IncomingRequest {
     messages: Vec<IncomingMessage>,
     #[serde(default)]
     stream: bool,
+    max_completion_tokens: Option<serde_json::Value>,
+    max_tokens: Option<serde_json::Value>,
 }
 
 #[derive(serde::Deserialize, Clone)]
@@ -65,12 +68,42 @@ pub fn make_error_response(
     (status, axum::Json(err)).into_response()
 }
 
+fn proxy_credentials_valid(state: &AppState, headers: &HeaderMap) -> bool {
+    let Some(expected) = state.proxy_token.as_deref() else {
+        return true;
+    };
+    headers
+        .get("x-kilovolt-key")
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|actual| secrets_match(expected, actual))
+}
+
+fn proxy_auth_error() -> Response {
+    make_error_response(
+        StatusCode::UNAUTHORIZED,
+        "Kilovolt proxy authentication failed",
+        "authentication_error",
+        Some("kilovolt_proxy_auth_failed"),
+    )
+}
+
 /// Deterministic local mock upstream used by tests and the benchmark harness.
 pub async fn mock_chat_completions(
     State(state): State<AppState>,
     headers: HeaderMap,
     body: Body,
 ) -> Response {
+    if !state.mock_upstream_enabled {
+        return make_error_response(
+            StatusCode::NOT_FOUND,
+            "Kilovolt mock upstream is disabled",
+            "invalid_request_error",
+            Some("mock_upstream_disabled"),
+        );
+    }
+    if !proxy_credentials_valid(&state, &headers) {
+        return proxy_auth_error();
+    }
     info!("Handling mock chat completions upstream request");
     let body = match axum::body::to_bytes(body, state.max_request_body_bytes).await {
         Ok(body) => body,
@@ -159,23 +192,36 @@ pub async fn mock_chat_completions(
 type BoxedByteStream =
     Pin<Box<dyn futures_util::stream::Stream<Item = Result<Bytes, reqwest::Error>> + Send>>;
 
-struct PromptReservationGuard {
+#[derive(Clone, Copy, Debug)]
+enum ReservationMode {
+    Streaming,
+    NonStreaming {
+        maximum_output_tokens: usize,
+        maximum_output_cost: f64,
+        accepted: bool,
+    },
+}
+
+struct RequestReservationGuard {
     state: AppState,
     request_id: String,
     user_id: String,
     model: String,
     prompt_tokens: usize,
+    prompt_cost: f64,
     start_time: Instant,
+    mode: ReservationMode,
     active: bool,
 }
 
-impl PromptReservationGuard {
-    fn new(
+impl RequestReservationGuard {
+    fn streaming(
         state: AppState,
         request_id: &str,
         user_id: &str,
         model: &str,
         prompt_tokens: usize,
+        prompt_cost: f64,
         start_time: Instant,
     ) -> Self {
         Self {
@@ -184,12 +230,46 @@ impl PromptReservationGuard {
             user_id: user_id.to_string(),
             model: model.to_string(),
             prompt_tokens,
+            prompt_cost,
             start_time,
+            mode: ReservationMode::Streaming,
             active: true,
         }
     }
 
-    fn commit(&mut self) -> Result<BudgetSnapshot, BudgetError> {
+    #[allow(clippy::too_many_arguments)]
+    fn non_streaming(
+        state: AppState,
+        request_id: &str,
+        user_id: &str,
+        model: &str,
+        prompt_tokens: usize,
+        prompt_cost: f64,
+        maximum_output_tokens: usize,
+        maximum_output_cost: f64,
+        start_time: Instant,
+    ) -> Self {
+        Self {
+            state,
+            request_id: request_id.to_string(),
+            user_id: user_id.to_string(),
+            model: model.to_string(),
+            prompt_tokens,
+            prompt_cost,
+            start_time,
+            mode: ReservationMode::NonStreaming {
+                maximum_output_tokens,
+                maximum_output_cost,
+                accepted: false,
+            },
+            active: true,
+        }
+    }
+
+    fn commit_streaming(&mut self) -> Result<BudgetSnapshot, BudgetError> {
+        if !matches!(self.mode, ReservationMode::Streaming) {
+            return Err(BudgetError::InvalidReservationTransition);
+        }
         let result = self
             .state
             .budget_ledger
@@ -198,6 +278,93 @@ impl PromptReservationGuard {
             self.active = false;
         }
         result
+    }
+
+    fn accept_non_stream(&mut self) -> Result<BudgetSnapshot, BudgetError> {
+        let ReservationMode::NonStreaming { accepted, .. } = &mut self.mode else {
+            return Err(BudgetError::InvalidReservationTransition);
+        };
+        // Successful upstream headers mean provider generation may already be
+        // billable. Mark the guard before the ledger transition so cancellation
+        // or an internal transition failure finalizes conservatively.
+        *accepted = true;
+        self.state
+            .budget_ledger
+            .accept_non_stream_prompt(&self.request_id, &self.user_id)
+    }
+
+    fn settle_non_stream(
+        &mut self,
+        actual_output_cost: f64,
+    ) -> Result<BudgetSnapshot, BudgetError> {
+        if !matches!(
+            self.mode,
+            ReservationMode::NonStreaming { accepted: true, .. }
+        ) {
+            return Err(BudgetError::InvalidReservationTransition);
+        }
+        let result = self.state.budget_ledger.settle_non_stream_output(
+            &self.request_id,
+            &self.user_id,
+            actual_output_cost,
+        );
+        if result.is_ok() {
+            self.active = false;
+        }
+        result
+    }
+
+    fn finalize_non_stream_conservatively(
+        &mut self,
+        reason: &str,
+    ) -> Result<BudgetSnapshot, BudgetError> {
+        if !matches!(
+            self.mode,
+            ReservationMode::NonStreaming { accepted: true, .. }
+        ) {
+            return Err(BudgetError::InvalidReservationTransition);
+        }
+        let result = self
+            .state
+            .budget_ledger
+            .finalize_unknown_output_conservatively(&self.request_id, &self.user_id);
+        match &result {
+            Ok(snapshot) => info!(
+                request_id = %self.request_id,
+                user_id = %self.user_id,
+                reason = %reason,
+                project_total_spend = %snapshot.project.total_spend,
+                user_total_spend = %snapshot.user.total_spend,
+                "Conservatively committed the full non-streaming output reservation"
+            ),
+            Err(error) => error!(
+                request_id = %self.request_id,
+                user_id = %self.user_id,
+                reason = %reason,
+                error = %error,
+                "Failed to conservatively finalize non-streaming output"
+            ),
+        }
+        if result.is_ok() {
+            if let Some((maximum_output_tokens, _)) = self.maximum_non_stream_output() {
+                self.state
+                    .total_tokens_consumed
+                    .fetch_add(maximum_output_tokens, Ordering::Relaxed);
+            }
+            self.active = false;
+        }
+        result
+    }
+
+    fn maximum_non_stream_output(&self) -> Option<(usize, f64)> {
+        match self.mode {
+            ReservationMode::Streaming => None,
+            ReservationMode::NonStreaming {
+                maximum_output_tokens,
+                maximum_output_cost,
+                ..
+            } => Some((maximum_output_tokens, maximum_output_cost)),
+        }
     }
 
     fn release(&mut self, reason: &str) {
@@ -226,22 +393,48 @@ impl PromptReservationGuard {
     }
 }
 
-impl Drop for PromptReservationGuard {
+impl Drop for RequestReservationGuard {
     fn drop(&mut self) {
         if !self.active {
             return;
         }
-        let release_result = self
-            .state
-            .budget_ledger
-            .release_prompt(&self.request_id, &self.user_id);
-        if let Err(error) = release_result {
+        let (tokens, cost, result) = match self.mode {
+            ReservationMode::NonStreaming {
+                maximum_output_tokens,
+                maximum_output_cost,
+                accepted: true,
+            } => (
+                self.prompt_tokens.saturating_add(maximum_output_tokens),
+                self.prompt_cost + maximum_output_cost,
+                self.state
+                    .budget_ledger
+                    .finalize_unknown_output_conservatively(&self.request_id, &self.user_id),
+            ),
+            ReservationMode::Streaming
+            | ReservationMode::NonStreaming {
+                accepted: false, ..
+            } => (
+                self.prompt_tokens,
+                0.0,
+                self.state
+                    .budget_ledger
+                    .release_prompt(&self.request_id, &self.user_id),
+            ),
+        };
+        if let Err(error) = result {
             error!(
                 request_id = %self.request_id,
                 user_id = %self.user_id,
                 error = %error,
-                "Failed to release prompt reservation after request task cancellation"
+                "Failed to finalize reservation after request task cancellation"
             );
+        } else if matches!(
+            self.mode,
+            ReservationMode::NonStreaming { accepted: true, .. }
+        ) {
+            self.state
+                .total_tokens_consumed
+                .fetch_add(tokens.saturating_sub(self.prompt_tokens), Ordering::Relaxed);
         }
         self.state.record_request(
             &self.request_id,
@@ -249,8 +442,8 @@ impl Drop for PromptReservationGuard {
             &self.model,
             499,
             self.start_time.elapsed().as_millis() as u64,
-            self.prompt_tokens,
-            0.0,
+            tokens,
+            cost,
         );
     }
 }
@@ -288,27 +481,354 @@ fn content_type_starts_with(headers: &HeaderMap, expected: &str) -> bool {
         .is_some_and(|value| value.to_ascii_lowercase().starts_with(expected))
 }
 
-fn fallback_message_text(value: &serde_json::Value) -> Option<String> {
-    let choices = value.get("choices")?.as_array()?;
-    let mut output = String::new();
-    for choice in choices {
-        let content = choice
-            .get("message")
-            .and_then(|message| message.get("content"));
-        match content {
-            Some(serde_json::Value::String(text)) => output.push_str(text),
-            Some(serde_json::Value::Array(parts)) => {
-                for part in parts {
-                    if let Some(text) = part.get("text").and_then(serde_json::Value::as_str) {
-                        output.push_str(text);
-                    }
-                }
-            }
-            Some(serde_json::Value::Null) | None => {}
-            Some(_) => return None,
+fn token_count(model: &str, text: &str) -> usize {
+    bpe_for_model(model)
+        .ok()
+        .or_else(|| bpe_for_model("gpt-4o").ok())
+        .map_or_else(
+            || text.len().div_ceil(4),
+            |bpe| bpe.encode_with_special_tokens(text).len(),
+        )
+}
+
+fn checked_token_cost(tokens: usize, per_token: f64) -> Result<f64, &'static str> {
+    let cost = tokens as f64 * per_token;
+    if cost.is_finite() && cost >= 0.0 {
+        Ok(cost)
+    } else {
+        Err("token cost overflowed")
+    }
+}
+
+fn parse_positive_token_bound(
+    value: &serde_json::Value,
+    field: &'static str,
+) -> Result<usize, &'static str> {
+    let raw = value
+        .as_u64()
+        .ok_or("non-stream output token bound must be a positive integer")?;
+    if raw == 0 {
+        return Err("non-stream output token bound must be a positive integer");
+    }
+    usize::try_from(raw).map_err(|_| field)
+}
+
+fn select_non_stream_output_bound(
+    request: &IncomingRequest,
+    configured_default: Option<usize>,
+) -> Result<usize, &'static str> {
+    if let Some(value) = request.max_completion_tokens.as_ref() {
+        return parse_positive_token_bound(value, "max_completion_tokens overflowed");
+    }
+    if let Some(value) = request.max_tokens.as_ref() {
+        return parse_positive_token_bound(value, "max_tokens overflowed");
+    }
+    configured_default.ok_or("non-streaming requests require a maximum output token bound")
+}
+
+fn is_nonempty_json(value: &serde_json::Value) -> bool {
+    match value {
+        serde_json::Value::Null => false,
+        serde_json::Value::Bool(value) => *value,
+        serde_json::Value::Number(_) => true,
+        serde_json::Value::String(value) => !value.is_empty(),
+        serde_json::Value::Array(values) => values.iter().any(is_nonempty_json),
+        serde_json::Value::Object(values) => values.values().any(is_nonempty_json),
+    }
+}
+
+fn prompt_requires_canonical_accounting(request: &serde_json::Value) -> bool {
+    const ADVANCED_TOP_LEVEL: &[&str] = &[
+        "tools",
+        "functions",
+        "tool_choice",
+        "function_call",
+        "response_format",
+    ];
+    if ADVANCED_TOP_LEVEL
+        .iter()
+        .any(|field| request.get(*field).is_some_and(is_nonempty_json))
+    {
+        return true;
+    }
+    request
+        .get("messages")
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|messages| {
+            messages.iter().any(|message| {
+                message
+                    .get("content")
+                    .is_some_and(|content| content.is_array())
+                    || ["function_call", "tool_calls", "tool_call_id", "refusal"]
+                        .iter()
+                        .any(|field| message.get(*field).is_some_and(is_nonempty_json))
+            })
+        })
+}
+
+fn canonical_prompt_tokens(model: &str, request: &serde_json::Value, basic_tokens: usize) -> usize {
+    if !prompt_requires_canonical_accounting(request) {
+        return basic_tokens;
+    }
+    let mut canonical = serde_json::Map::new();
+    for field in [
+        "messages",
+        "tools",
+        "functions",
+        "tool_choice",
+        "function_call",
+        "response_format",
+    ] {
+        if let Some(value) = request.get(field)
+            && is_nonempty_json(value)
+        {
+            canonical.insert(field.to_string(), value.clone());
         }
     }
-    Some(output)
+    let serialized = serde_json::Value::Object(canonical).to_string();
+    basic_tokens.max(token_count(model, &serialized))
+}
+
+#[derive(Debug)]
+struct GeneratedRepresentation {
+    canonical: serde_json::Value,
+    plain_text: Option<String>,
+}
+
+fn canonicalize_structured_content(
+    content: &serde_json::Value,
+) -> Result<serde_json::Value, &'static str> {
+    let parts = content
+        .as_array()
+        .ok_or("structured completion content was not an array")?;
+    let mut canonical_parts = Vec::with_capacity(parts.len());
+    for part in parts {
+        let object = part
+            .as_object()
+            .ok_or("structured completion part was not an object")?;
+        for (field, value) in object {
+            if !matches!(field.as_str(), "type" | "text" | "refusal") && is_nonempty_json(value) {
+                return Err("unsupported billable structured content field");
+            }
+        }
+        let part_type = object
+            .get("type")
+            .and_then(serde_json::Value::as_str)
+            .ok_or("structured completion part had no supported type")?;
+        if !matches!(part_type, "text" | "refusal") {
+            return Err("unsupported billable structured content type");
+        }
+        let mut canonical = serde_json::Map::new();
+        canonical.insert(
+            "type".to_string(),
+            serde_json::Value::String(part_type.to_string()),
+        );
+        let value_field = if part_type == "text" {
+            "text"
+        } else {
+            "refusal"
+        };
+        let text = object
+            .get(value_field)
+            .and_then(serde_json::Value::as_str)
+            .ok_or("structured completion part had no supported text")?;
+        canonical.insert(
+            value_field.to_string(),
+            serde_json::Value::String(text.to_string()),
+        );
+        canonical_parts.push(serde_json::Value::Object(canonical));
+    }
+    Ok(serde_json::Value::Array(canonical_parts))
+}
+
+fn canonicalize_function_call(
+    value: &serde_json::Value,
+) -> Result<serde_json::Value, &'static str> {
+    let object = value.as_object().ok_or("function_call was not an object")?;
+    for (field, value) in object {
+        if !matches!(field.as_str(), "name" | "arguments") && is_nonempty_json(value) {
+            return Err("unsupported billable function_call field");
+        }
+    }
+    let mut canonical = serde_json::Map::new();
+    for field in ["name", "arguments"] {
+        if let Some(value) = object.get(field)
+            && !value.is_null()
+        {
+            let string = value
+                .as_str()
+                .ok_or("function_call field was not a string")?;
+            canonical.insert(
+                field.to_string(),
+                serde_json::Value::String(string.to_string()),
+            );
+        }
+    }
+    Ok(serde_json::Value::Object(canonical))
+}
+
+fn canonicalize_tool_calls(value: &serde_json::Value) -> Result<serde_json::Value, &'static str> {
+    let calls = value.as_array().ok_or("tool_calls was not an array")?;
+    let mut canonical_calls = Vec::with_capacity(calls.len());
+    for call in calls {
+        let object = call.as_object().ok_or("tool call was not an object")?;
+        for (field, value) in object {
+            if !matches!(field.as_str(), "index" | "id" | "type" | "function")
+                && is_nonempty_json(value)
+            {
+                return Err("unsupported billable tool-call field");
+            }
+        }
+        let mut canonical = serde_json::Map::new();
+        for field in ["id", "type"] {
+            if let Some(value) = object.get(field)
+                && !value.is_null()
+            {
+                let string = value
+                    .as_str()
+                    .ok_or("tool-call identifier or type was not a string")?;
+                canonical.insert(
+                    field.to_string(),
+                    serde_json::Value::String(string.to_string()),
+                );
+            }
+        }
+        if let Some(function) = object.get("function")
+            && !function.is_null()
+        {
+            canonical.insert(
+                "function".to_string(),
+                canonicalize_function_call(function)?,
+            );
+        }
+        canonical_calls.push(serde_json::Value::Object(canonical));
+    }
+    Ok(serde_json::Value::Array(canonical_calls))
+}
+
+fn canonicalize_generated_object(
+    value: &serde_json::Value,
+) -> Result<GeneratedRepresentation, &'static str> {
+    let object = value
+        .as_object()
+        .ok_or("generated completion payload was not an object")?;
+    for (field, value) in object {
+        if !matches!(
+            field.as_str(),
+            "role" | "content" | "refusal" | "function_call" | "tool_calls"
+        ) && is_nonempty_json(value)
+        {
+            return Err("unsupported billable output field");
+        }
+    }
+
+    let mut canonical = serde_json::Map::new();
+    let mut plain_text = Some(String::new());
+    let mut advanced = false;
+    if let Some(content) = object.get("content")
+        && !content.is_null()
+    {
+        match content {
+            serde_json::Value::String(text) => {
+                plain_text = Some(text.clone());
+                canonical.insert("content".to_string(), content.clone());
+            }
+            serde_json::Value::Array(_) => {
+                advanced = true;
+                canonical.insert(
+                    "content".to_string(),
+                    canonicalize_structured_content(content)?,
+                );
+            }
+            _ => return Err("completion content had an unsupported type"),
+        }
+    }
+    if let Some(refusal) = object.get("refusal")
+        && !refusal.is_null()
+    {
+        advanced = true;
+        let refusal = refusal
+            .as_str()
+            .ok_or("completion refusal was not a string")?;
+        canonical.insert(
+            "refusal".to_string(),
+            serde_json::Value::String(refusal.to_string()),
+        );
+    }
+    if let Some(function_call) = object.get("function_call")
+        && !function_call.is_null()
+    {
+        advanced = true;
+        canonical.insert(
+            "function_call".to_string(),
+            canonicalize_function_call(function_call)?,
+        );
+    }
+    if let Some(tool_calls) = object.get("tool_calls")
+        && !tool_calls.is_null()
+    {
+        advanced = true;
+        canonical.insert(
+            "tool_calls".to_string(),
+            canonicalize_tool_calls(tool_calls)?,
+        );
+    }
+
+    Ok(GeneratedRepresentation {
+        canonical: serde_json::Value::Object(canonical),
+        plain_text: if advanced { None } else { plain_text },
+    })
+}
+
+fn locally_accounted_choice_tokens(
+    model: &str,
+    choices: &[serde_json::Value],
+    payload_field: &str,
+) -> Result<usize, &'static str> {
+    let mut canonical_choices = Vec::with_capacity(choices.len());
+    let mut plain_text = String::new();
+    let mut all_plain = true;
+    for choice in choices {
+        let object = choice.as_object().ok_or("choice was not an object")?;
+        for (field, value) in object {
+            if !matches!(
+                field.as_str(),
+                "index" | "message" | "delta" | "finish_reason" | "logprobs"
+            ) && is_nonempty_json(value)
+            {
+                return Err("unsupported billable output field");
+            }
+        }
+        let generated = object
+            .get(payload_field)
+            .ok_or("choice had no supported generated payload")?;
+        let representation = canonicalize_generated_object(generated)?;
+        if let Some(text) = representation.plain_text.as_deref() {
+            plain_text.push_str(text);
+        } else {
+            all_plain = false;
+        }
+        canonical_choices.push(representation.canonical);
+    }
+    if all_plain {
+        Ok(token_count(model, &plain_text))
+    } else {
+        Ok(token_count(
+            model,
+            &serde_json::Value::Array(canonical_choices).to_string(),
+        ))
+    }
+}
+
+pub(crate) fn streaming_output_tokens(
+    model: &str,
+    value: &serde_json::Value,
+) -> Result<usize, &'static str> {
+    let choices = value
+        .get("choices")
+        .and_then(serde_json::Value::as_array)
+        .ok_or("streaming frame had no choices array")?;
+    locally_accounted_choice_tokens(model, choices, "delta")
 }
 
 fn non_stream_output_tokens(
@@ -324,16 +844,12 @@ fn non_stream_output_tokens(
         return Ok((tokens, "provider usage.completion_tokens"));
     }
 
-    let output = fallback_message_text(value)
-        .ok_or("response had neither supported usage nor completion message content")?;
-    let tokens = bpe_for_model(model)
-        .ok()
-        .or_else(|| bpe_for_model("gpt-4o").ok())
-        .map_or_else(
-            || output.len().div_ceil(4),
-            |bpe| bpe.encode_with_special_tokens(&output).len(),
-        );
-    Ok((tokens, "local complete-message tokenizer fallback"))
+    let choices = value
+        .get("choices")
+        .and_then(serde_json::Value::as_array)
+        .ok_or("response had neither supported usage nor choices")?;
+    let tokens = locally_accounted_choice_tokens(model, choices, "message")?;
+    Ok((tokens, "local supported-message tokenizer fallback"))
 }
 
 fn record_token_budget_usage(state: &AppState, pipeline_id: Option<&str>, total_tokens: usize) {
@@ -346,6 +862,22 @@ fn record_token_budget_usage(state: &AppState, pipeline_id: Option<&str>, total_
     }
 }
 
+fn conservatively_finalize_non_stream_failure(
+    guard: &mut RequestReservationGuard,
+    state: &AppState,
+    pipeline_id: Option<&str>,
+    reason: &str,
+) -> (usize, f64) {
+    let (maximum_output_tokens, maximum_output_cost) = guard
+        .maximum_non_stream_output()
+        .expect("non-stream failure helper requires a non-stream reservation");
+    let total_tokens = guard.prompt_tokens.saturating_add(maximum_output_tokens);
+    let total_cost = guard.prompt_cost + maximum_output_cost;
+    let _ = guard.finalize_non_stream_conservatively(reason);
+    record_token_budget_usage(state, pipeline_id, total_tokens);
+    (total_tokens, total_cost)
+}
+
 /// The core chat completions reverse proxy endpoint handler.
 pub async fn chat_completions_proxy(
     State(state): State<AppState>,
@@ -355,6 +887,36 @@ pub async fn chat_completions_proxy(
     info!("Ingesting POST /v1/chat/completions request");
     let start_time = Instant::now();
     let request_id = uuid::Uuid::new_v4().to_string();
+
+    if !proxy_credentials_valid(&state, &headers) {
+        state.record_request(
+            &request_id,
+            "anonymous",
+            "unknown",
+            401,
+            start_time.elapsed().as_millis() as u64,
+            0,
+            0.0,
+        );
+        return proxy_auth_error();
+    }
+    if headers.contains_key("x-mock-upstream") && !state.mock_upstream_enabled {
+        state.record_request(
+            &request_id,
+            "anonymous",
+            "unknown",
+            403,
+            start_time.elapsed().as_millis() as u64,
+            0,
+            0.0,
+        );
+        return make_error_response(
+            StatusCode::FORBIDDEN,
+            "X-Mock-Upstream requires KILOVOLT_ENABLE_MOCK_UPSTREAM=true",
+            "invalid_request_error",
+            Some("mock_upstream_disabled"),
+        );
+    }
 
     // 1. Extract and validate Authorization header
     let auth_val = match headers.get(axum::http::header::AUTHORIZATION) {
@@ -519,8 +1081,8 @@ pub async fn chat_completions_proxy(
     };
 
     // 5. Parse request body JSON
-    let request: IncomingRequest = match serde_json::from_slice(&body_bytes) {
-        Ok(req) => req,
+    let mut request_json: serde_json::Value = match serde_json::from_slice(&body_bytes) {
+        Ok(value) => value,
         Err(e) => {
             warn!("Failed to deserialize request JSON: {:?}", e);
             state.record_request(
@@ -537,6 +1099,27 @@ pub async fn chat_completions_proxy(
                 "Invalid JSON payload",
                 "invalid_request_error",
                 None,
+            );
+        }
+    };
+    let request: IncomingRequest = match serde_json::from_value(request_json.clone()) {
+        Ok(request) => request,
+        Err(error) => {
+            warn!("Request JSON did not match the supported shape: {error}");
+            state.record_request(
+                &request_id,
+                &user_id,
+                "unknown",
+                400,
+                start_time.elapsed().as_millis() as u64,
+                0,
+                0.0,
+            );
+            return make_error_response(
+                StatusCode::BAD_REQUEST,
+                "Request JSON did not match the supported chat-completions shape",
+                "invalid_request_error",
+                Some("invalid_request_shape"),
             );
         }
     };
@@ -560,6 +1143,44 @@ pub async fn chat_completions_proxy(
         );
     }
 
+    let provider = Provider::for_model(&request.model);
+    let resolved_pricing = match state.pricing_registry.resolve(provider, &request.model) {
+        Ok(pricing) => pricing,
+        Err(error) => {
+            warn!(
+                model = %request.model,
+                provider = %provider,
+                error = %error,
+                "Rejecting request because model pricing is not configured"
+            );
+            state.record_request(
+                &request_id,
+                &user_id,
+                &request.model,
+                400,
+                start_time.elapsed().as_millis() as u64,
+                0,
+                0.0,
+            );
+            return make_error_response(
+                StatusCode::BAD_REQUEST,
+                "Model pricing is not configured for this provider/model",
+                "invalid_request_error",
+                Some("model_pricing_not_configured"),
+            );
+        }
+    };
+    let pricing = resolved_pricing.pricing;
+    info!(
+        model = %request.model,
+        provider = %provider,
+        pricing_source = %resolved_pricing.source,
+        pricing_match = %resolved_pricing.match_type,
+        pricing_pattern = %resolved_pricing.matched_model,
+        effective_date = ?resolved_pricing.effective_date,
+        "Resolved request pricing"
+    );
+
     // 6. Pre-flight budget & BPE token count evaluation
     let tiktoken_messages: Vec<ChatCompletionRequestMessage> = request
         .messages
@@ -581,13 +1202,14 @@ pub async fn chat_completions_proxy(
         })
         .collect();
 
-    let prompt_tokens = match num_tokens_from_messages(&request.model, &tiktoken_messages) {
+    let basic_prompt_tokens = match num_tokens_from_messages(&request.model, &tiktoken_messages) {
         Ok(t) => t,
         Err(_) => {
             // Fallback to standard gpt-4o tokenization
             num_tokens_from_messages("gpt-4o", &tiktoken_messages).unwrap_or(0)
         }
     };
+    let prompt_tokens = canonical_prompt_tokens(&request.model, &request_json, basic_prompt_tokens);
 
     // 6.5. Pre-flight check for multi-tier token budgeting
     let pipeline_id = headers
@@ -629,16 +1251,106 @@ pub async fn chat_completions_proxy(
         );
     }
 
-    let pricing = get_model_pricing(&request.model);
-    let prompt_cost = prompt_tokens as f64 * pricing.input_cost_per_token;
+    let prompt_cost = match checked_token_cost(prompt_tokens, pricing.input_cost_per_token) {
+        Ok(cost) => cost,
+        Err(reason) => {
+            error!(model = %request.model, prompt_tokens, reason, "Prompt cost overflow");
+            return make_error_response(
+                StatusCode::BAD_REQUEST,
+                "Prompt cost could not be represented safely",
+                "invalid_request_error",
+                Some("accounting_overflow"),
+            );
+        }
+    };
 
-    let reservation = match state.budget_ledger.reserve_prompt(
-        &request_id,
-        &user_id,
-        prompt_cost,
-        state.project_budget,
-        state.default_budget,
-    ) {
+    let maximum_non_stream_output = if request.stream {
+        None
+    } else {
+        let maximum_tokens = match select_non_stream_output_bound(
+            &request,
+            state.non_stream_default_max_output_tokens,
+        ) {
+            Ok(tokens) => tokens,
+            Err(reason) => {
+                state.record_request(
+                    &request_id,
+                    &user_id,
+                    &request.model,
+                    400,
+                    start_time.elapsed().as_millis() as u64,
+                    prompt_tokens,
+                    0.0,
+                );
+                return make_error_response(
+                    StatusCode::BAD_REQUEST,
+                    reason,
+                    "invalid_request_error",
+                    Some("non_stream_output_bound_required"),
+                );
+            }
+        };
+        if prompt_tokens.checked_add(maximum_tokens).is_none() {
+            return make_error_response(
+                StatusCode::BAD_REQUEST,
+                "Prompt plus maximum output tokens overflowed internal accounting",
+                "invalid_request_error",
+                Some("accounting_overflow"),
+            );
+        }
+        let maximum_cost = match checked_token_cost(maximum_tokens, pricing.output_cost_per_token) {
+            Ok(cost) => cost,
+            Err(reason) => {
+                error!(
+                    model = %request.model,
+                    maximum_tokens,
+                    reason,
+                    "Maximum output reservation overflow"
+                );
+                return make_error_response(
+                    StatusCode::BAD_REQUEST,
+                    "Maximum output cost could not be represented safely",
+                    "invalid_request_error",
+                    Some("accounting_overflow"),
+                );
+            }
+        };
+        if request.max_completion_tokens.is_none() && request.max_tokens.is_none() {
+            let Some(object) = request_json.as_object_mut() else {
+                return make_error_response(
+                    StatusCode::BAD_REQUEST,
+                    "Request body must be a JSON object",
+                    "invalid_request_error",
+                    Some("invalid_request_shape"),
+                );
+            };
+            object.insert(
+                "max_completion_tokens".to_string(),
+                serde_json::json!(maximum_tokens),
+            );
+        }
+        Some((maximum_tokens, maximum_cost))
+    };
+
+    let reservation_result = if let Some((_, maximum_output_cost)) = maximum_non_stream_output {
+        state.budget_ledger.reserve_non_stream_request(
+            &request_id,
+            &user_id,
+            prompt_cost,
+            maximum_output_cost,
+            state.project_budget,
+            state.default_budget,
+        )
+    } else {
+        state.budget_ledger.reserve_prompt(
+            &request_id,
+            &user_id,
+            prompt_cost,
+            state.project_budget,
+            state.default_budget,
+        )
+    };
+    let reservation = match reservation_result {
         Ok(snapshot) => snapshot,
         Err(error @ BudgetError::BudgetExceeded(scope)) => {
             let user_snapshot = state.budget_ledger.user_snapshot(&user_id);
@@ -703,18 +1415,36 @@ pub async fn chat_completions_proxy(
         request_id = %request_id,
         prompt_tokens = %prompt_tokens,
         prompt_cost = %prompt_cost,
+        maximum_output_tokens = ?maximum_non_stream_output.map(|(tokens, _)| tokens),
+        maximum_output_cost = ?maximum_non_stream_output.map(|(_, cost)| cost),
         project_total_spend_with_reservations = %reservation.project.total_spend,
         user_total_spend_with_reservations = %reservation.user.total_spend,
-        "Bankruptcy Shield: Reserved prompt cost"
+        "Bankruptcy Shield: Reserved request cost"
     );
-    let mut reservation_guard = PromptReservationGuard::new(
-        state.clone(),
-        &request_id,
-        &user_id,
-        &request.model,
-        prompt_tokens,
-        start_time,
-    );
+    let mut reservation_guard =
+        if let Some((maximum_output_tokens, maximum_output_cost)) = maximum_non_stream_output {
+            RequestReservationGuard::non_streaming(
+                state.clone(),
+                &request_id,
+                &user_id,
+                &request.model,
+                prompt_tokens,
+                prompt_cost,
+                maximum_output_tokens,
+                maximum_output_cost,
+                start_time,
+            )
+        } else {
+            RequestReservationGuard::streaming(
+                state.clone(),
+                &request_id,
+                &user_id,
+                &request.model,
+                prompt_tokens,
+                prompt_cost,
+                start_time,
+            )
+        };
 
     // Update total tokens consumed globally after the financial reservation succeeds.
     state
@@ -745,6 +1475,9 @@ pub async fn chat_completions_proxy(
     // 8. Prepare Upstream Request. We format payload according to provider targets.
     let mut upstream_req = state.client.post(&upstream_url);
     if headers.contains_key("x-mock-upstream") {
+        if let Some(proxy_token) = state.proxy_token.as_deref() {
+            upstream_req = upstream_req.header("x-kilovolt-key", proxy_token);
+        }
         for name in ["x-mock-events", "x-mock-delay-ms"] {
             if let Some(value) = headers.get(name) {
                 upstream_req = upstream_req.header(name, value);
@@ -814,10 +1547,23 @@ pub async fn chat_completions_proxy(
         upstream_req = upstream_req.body(gemini_body);
     } else {
         // Standard OpenAI layout
+        let forwarded_body = match serde_json::to_vec(&request_json) {
+            Ok(body) => body,
+            Err(error) => {
+                reservation_guard.release("OpenAI request serialization failed");
+                error!("Failed to serialize forwarded request: {error}");
+                return make_error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Failed to prepare upstream request",
+                    "api_error",
+                    None,
+                );
+            }
+        };
         upstream_req = upstream_req
             .header(reqwest::header::AUTHORIZATION, auth_val)
             .header(reqwest::header::CONTENT_TYPE, content_type_val)
-            .body(body_bytes.clone());
+            .body(forwarded_body);
     }
 
     info!(
@@ -956,7 +1702,11 @@ pub async fn chat_completions_proxy(
         });
     }
 
-    let committed = match reservation_guard.commit() {
+    let committed = match if request.stream {
+        reservation_guard.commit_streaming()
+    } else {
+        reservation_guard.accept_non_stream()
+    } {
         Ok(snapshot) => snapshot,
         Err(error) => {
             error!(
@@ -965,14 +1715,24 @@ pub async fn chat_completions_proxy(
                 error = %error,
                 "Failed to commit prompt reservation after upstream acceptance"
             );
+            let (recorded_tokens, recorded_cost) = if request.stream {
+                (prompt_tokens, 0.0)
+            } else {
+                conservatively_finalize_non_stream_failure(
+                    &mut reservation_guard,
+                    &state,
+                    pipeline_id.as_deref(),
+                    "ledger acceptance transition failed after provider acceptance",
+                )
+            };
             state.record_request(
                 &request_id,
                 &user_id,
                 &request.model,
                 500,
                 start_time.elapsed().as_millis() as u64,
-                prompt_tokens,
-                0.0,
+                recorded_tokens,
+                recorded_cost,
             );
             return make_error_response(
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -990,22 +1750,31 @@ pub async fn chat_completions_proxy(
         prompt_cost = %prompt_cost,
         project_total_spend = %committed.project.total_spend,
         user_total_spend = %committed.user.total_spend,
-        "Upstream request succeeded. Committed prompt reservation and initiating downstream streaming."
+        non_stream_output_reserved = %(!request.stream),
+        "Upstream request succeeded. Committed prompt cost; any non-streaming output maximum remains reserved."
     );
 
     let upstream_headers = upstream_res.headers().clone();
 
     if !request.stream {
+        let (maximum_output_tokens, maximum_output_cost) = reservation_guard
+            .maximum_non_stream_output()
+            .expect("non-stream request must have an output reservation");
         if !content_type_starts_with(&upstream_headers, "application/json") {
-            record_token_budget_usage(&state, pipeline_id.as_deref(), prompt_tokens);
+            let (recorded_tokens, recorded_cost) = conservatively_finalize_non_stream_failure(
+                &mut reservation_guard,
+                &state,
+                pipeline_id.as_deref(),
+                "invalid upstream content type after acceptance",
+            );
             state.record_request(
                 &request_id,
                 &user_id,
                 &request.model,
                 502,
                 start_time.elapsed().as_millis() as u64,
-                prompt_tokens,
-                prompt_cost,
+                recorded_tokens,
+                recorded_cost,
             );
             return make_error_response(
                 StatusCode::BAD_GATEWAY,
@@ -1019,15 +1788,21 @@ pub async fn chat_completions_proxy(
             match read_bounded_response(upstream_res, state.max_upstream_body_bytes).await {
                 Ok(body) => body,
                 Err(BoundedBodyError::TooLarge) => {
-                    record_token_budget_usage(&state, pipeline_id.as_deref(), prompt_tokens);
+                    let (recorded_tokens, recorded_cost) =
+                        conservatively_finalize_non_stream_failure(
+                            &mut reservation_guard,
+                            &state,
+                            pipeline_id.as_deref(),
+                            "upstream body exceeded limit after acceptance",
+                        );
                     state.record_request(
                         &request_id,
                         &user_id,
                         &request.model,
                         502,
                         start_time.elapsed().as_millis() as u64,
-                        prompt_tokens,
-                        prompt_cost,
+                        recorded_tokens,
+                        recorded_cost,
                     );
                     return make_error_response(
                         StatusCode::BAD_GATEWAY,
@@ -1038,15 +1813,21 @@ pub async fn chat_completions_proxy(
                 }
                 Err(BoundedBodyError::Upstream(error)) => {
                     error!("Upstream disconnected while reading JSON response: {error}");
-                    record_token_budget_usage(&state, pipeline_id.as_deref(), prompt_tokens);
+                    let (recorded_tokens, recorded_cost) =
+                        conservatively_finalize_non_stream_failure(
+                            &mut reservation_guard,
+                            &state,
+                            pipeline_id.as_deref(),
+                            "upstream disconnected after acceptance",
+                        );
                     state.record_request(
                         &request_id,
                         &user_id,
                         &request.model,
                         502,
                         start_time.elapsed().as_millis() as u64,
-                        prompt_tokens,
-                        prompt_cost,
+                        recorded_tokens,
+                        recorded_cost,
                     );
                     return make_error_response(
                         StatusCode::BAD_GATEWAY,
@@ -1059,15 +1840,20 @@ pub async fn chat_completions_proxy(
         let response_json = match serde_json::from_slice::<serde_json::Value>(&response_bytes) {
             Ok(value) => value,
             Err(_) => {
-                record_token_budget_usage(&state, pipeline_id.as_deref(), prompt_tokens);
+                let (recorded_tokens, recorded_cost) = conservatively_finalize_non_stream_failure(
+                    &mut reservation_guard,
+                    &state,
+                    pipeline_id.as_deref(),
+                    "malformed JSON after acceptance",
+                );
                 state.record_request(
                     &request_id,
                     &user_id,
                     &request.model,
                     502,
                     start_time.elapsed().as_millis() as u64,
-                    prompt_tokens,
-                    prompt_cost,
+                    recorded_tokens,
+                    recorded_cost,
                 );
                 return make_error_response(
                     StatusCode::BAD_GATEWAY,
@@ -1081,58 +1867,117 @@ pub async fn chat_completions_proxy(
             match non_stream_output_tokens(&request.model, &response_json) {
                 Ok(accounting) => accounting,
                 Err(reason) => {
-                    record_token_budget_usage(&state, pipeline_id.as_deref(), prompt_tokens);
+                    let (recorded_tokens, recorded_cost) =
+                        conservatively_finalize_non_stream_failure(
+                            &mut reservation_guard,
+                            &state,
+                            pipeline_id.as_deref(),
+                            reason,
+                        );
                     state.record_request(
                         &request_id,
                         &user_id,
                         &request.model,
                         502,
                         start_time.elapsed().as_millis() as u64,
-                        prompt_tokens,
-                        prompt_cost,
+                        recorded_tokens,
+                        recorded_cost,
                     );
                     return make_error_response(
                         StatusCode::BAD_GATEWAY,
                         &format!("Unsupported non-streaming upstream response: {reason}"),
                         "api_error",
-                        Some("malformed_upstream_response"),
+                        Some("unsupported_billable_output_field"),
                     );
                 }
             };
-        let output_cost = output_tokens as f64 * pricing.output_cost_per_token;
-        let charged = match state.budget_ledger.try_charge_output(
-            &user_id,
-            output_cost,
-            state.project_budget,
-            state.default_budget,
-        ) {
-            Ok(snapshot) => snapshot,
-            Err(BudgetError::BudgetExceeded(scope)) => {
-                warn!(
-                    user_id = %user_id,
-                    budget_scope = %scope,
-                    output_tokens = %output_tokens,
-                    output_cost = %output_cost,
-                    "Non-streaming output was withheld because its charge would exceed a budget"
+        if output_tokens > maximum_output_tokens {
+            warn!(
+                model = %request.model,
+                requested_output_token_bound = %maximum_output_tokens,
+                reported_or_estimated_output_tokens = %output_tokens,
+                reserved_output_cost = %maximum_output_cost,
+                "Provider usage exceeded the reserved non-streaming output bound"
+            );
+            let (recorded_tokens, recorded_cost) = conservatively_finalize_non_stream_failure(
+                &mut reservation_guard,
+                &state,
+                pipeline_id.as_deref(),
+                "provider usage exceeded reserved output bound",
+            );
+            state.record_request(
+                &request_id,
+                &user_id,
+                &request.model,
+                502,
+                start_time.elapsed().as_millis() as u64,
+                recorded_tokens,
+                recorded_cost,
+            );
+            return make_error_response(
+                StatusCode::BAD_GATEWAY,
+                "Provider usage exceeded the reserved maximum output bound",
+                "api_error",
+                Some("provider_usage_exceeded_reserved_bound"),
+            );
+        }
+        let output_cost = match checked_token_cost(output_tokens, pricing.output_cost_per_token) {
+            Ok(cost) => cost,
+            Err(reason) => {
+                let (recorded_tokens, recorded_cost) = conservatively_finalize_non_stream_failure(
+                    &mut reservation_guard,
+                    &state,
+                    pipeline_id.as_deref(),
+                    reason,
                 );
-                record_token_budget_usage(&state, pipeline_id.as_deref(), prompt_tokens);
                 state.record_request(
                     &request_id,
                     &user_id,
                     &request.model,
-                    429,
+                    502,
                     start_time.elapsed().as_millis() as u64,
-                    prompt_tokens,
-                    prompt_cost,
+                    recorded_tokens,
+                    recorded_cost,
                 );
                 return make_error_response(
-                    StatusCode::TOO_MANY_REQUESTS,
-                    match scope {
-                        BudgetScope::Project => "Project Budget Exceeded",
-                        BudgetScope::User => "User Budget Exceeded",
-                    },
-                    "requests",
-                    Some("budget_exceeded"),
+                    StatusCode::BAD_GATEWAY,
+                    "Provider output cost could not be represented safely",
+                    "api_error",
+                    Some("accounting_overflow"),
+                );
+            }
+        };
+        let charged = match reservation_guard.settle_non_stream(output_cost) {
+            Ok(snapshot) => snapshot,
+            Err(BudgetError::OutputExceedsReservation) => {
+                warn!(
+                    user_id = %user_id,
+                    output_tokens = %output_tokens,
+                    output_cost = %output_cost,
+                    maximum_output_tokens = %maximum_output_tokens,
+                    maximum_output_cost = %maximum_output_cost,
+                    "Calculated output exceeded its reservation"
+                );
+                let (recorded_tokens, recorded_cost) = conservatively_finalize_non_stream_failure(
+                    &mut reservation_guard,
+                    &state,
+                    pipeline_id.as_deref(),
+                    "calculated output exceeded reserved cost",
+                );
+                state.record_request(
+                    &request_id,
+                    &user_id,
+                    &request.model,
+                    502,
+                    start_time.elapsed().as_millis() as u64,
+                    recorded_tokens,
+                    recorded_cost,
+                );
+                return make_error_response(
+                    StatusCode::BAD_GATEWAY,
+                    "Provider output exceeded its reserved accounting bound",
+                    "api_error",
+                    Some("provider_usage_exceeded_reserved_bound"),
                 );
             }
             Err(error) => {
@@ -1140,17 +1985,22 @@ pub async fn chat_completions_proxy(
                     request_id = %request_id,
                     user_id = %user_id,
                     error = %error,
-                    "Failed to charge non-streaming output"
+                    "Failed to settle non-streaming output reservation"
                 );
-                record_token_budget_usage(&state, pipeline_id.as_deref(), prompt_tokens);
+                let (recorded_tokens, recorded_cost) = conservatively_finalize_non_stream_failure(
+                    &mut reservation_guard,
+                    &state,
+                    pipeline_id.as_deref(),
+                    "internal settlement failure",
+                );
                 state.record_request(
                     &request_id,
                     &user_id,
                     &request.model,
                     500,
                     start_time.elapsed().as_millis() as u64,
-                    prompt_tokens,
-                    prompt_cost,
+                    recorded_tokens,
+                    recorded_cost,
                 );
                 return make_error_response(
                     StatusCode::INTERNAL_SERVER_ERROR,
@@ -1263,7 +2113,10 @@ pub async fn chat_completions_proxy(
 
 #[cfg(test)]
 mod tests {
-    use super::chat_completions_proxy;
+    use super::{
+        IncomingRequest, canonical_prompt_tokens, chat_completions_proxy, mock_chat_completions,
+        non_stream_output_tokens, select_non_stream_output_bound, streaming_output_tokens,
+    };
     use axum::Router;
     use axum::body::{Body, Bytes};
     use axum::extract::State;
@@ -1271,11 +2124,20 @@ mod tests {
     use axum::routing::post;
     use futures_util::stream;
     use http_body_util::BodyExt;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
     use tiktoken_rs::{ChatCompletionRequestMessage, bpe_for_model, num_tokens_from_messages};
 
-    use crate::budget::get_model_pricing;
     use crate::config::{AppState, test_state, test_state_with_budgets};
+    use crate::pricing::{ModelPricing, PricingRegistry, Provider};
+
+    fn get_model_pricing(model: &str) -> ModelPricing {
+        PricingRegistry::built_in()
+            .resolve(Provider::for_model(model), model)
+            .expect("test model pricing should resolve")
+            .pricing
+    }
 
     fn proxy_headers(user_id: &str) -> HeaderMap {
         let mut headers = HeaderMap::new();
@@ -1402,6 +2264,308 @@ mod tests {
             .to_bytes()
     }
 
+    #[test]
+    fn non_stream_output_bound_precedence_is_strict_and_positive() {
+        let request: IncomingRequest = serde_json::from_value(serde_json::json!({
+            "model": "gpt-4o-mini",
+            "messages": [],
+            "max_completion_tokens": 7,
+            "max_tokens": 9
+        }))
+        .unwrap();
+        assert_eq!(select_non_stream_output_bound(&request, Some(11)), Ok(7));
+
+        let legacy: IncomingRequest = serde_json::from_value(serde_json::json!({
+            "model": "gpt-4o-mini", "messages": [], "max_tokens": 9
+        }))
+        .unwrap();
+        assert_eq!(select_non_stream_output_bound(&legacy, Some(11)), Ok(9));
+
+        let configured: IncomingRequest = serde_json::from_value(serde_json::json!({
+            "model": "gpt-4o-mini", "messages": []
+        }))
+        .unwrap();
+        assert_eq!(
+            select_non_stream_output_bound(&configured, Some(11)),
+            Ok(11)
+        );
+        assert!(select_non_stream_output_bound(&configured, None).is_err());
+
+        let zero: IncomingRequest = serde_json::from_value(serde_json::json!({
+            "model": "gpt-4o-mini", "messages": [], "max_completion_tokens": 0
+        }))
+        .unwrap();
+        assert!(select_non_stream_output_bound(&zero, Some(11)).is_err());
+    }
+
+    #[test]
+    fn advanced_prompts_include_tools_calls_results_and_structured_content() {
+        let basic = serde_json::json!({
+            "messages": [{"role": "user", "content": "weather"}]
+        });
+        let tools = serde_json::json!({
+            "messages": [
+                {"role": "user", "content": [{"type": "text", "text": "weather"}]},
+                {"role": "assistant", "tool_calls": [{
+                    "id": "call_1", "type": "function",
+                    "function": {"name": "forecast", "arguments": "{\"city\":\"Bangkok\"}"}
+                }]},
+                {"role": "tool", "tool_call_id": "call_1", "content": "sunny"}
+            ],
+            "tools": [{
+                "type": "function",
+                "function": {"name": "forecast", "parameters": {
+                    "type": "object", "properties": {"city": {"type": "string"}}
+                }}
+            }],
+            "response_format": {"type": "json_object"}
+        });
+        let basic_tokens = canonical_prompt_tokens("gpt-4o-mini", &basic, 10);
+        let advanced_tokens = canonical_prompt_tokens("gpt-4o-mini", &tools, 10);
+        assert_eq!(basic_tokens, 10);
+        assert!(advanced_tokens > basic_tokens);
+    }
+
+    #[test]
+    fn supported_generated_tool_and_function_fields_are_accounted() {
+        let function_frame = serde_json::json!({
+            "choices": [{"delta": {"function_call": {
+                "name": "forecast", "arguments": "{\"city\":\"Bangkok\"}"
+            }}}]
+        });
+        let tool_frame = serde_json::json!({
+            "choices": [{"delta": {"tool_calls": [
+                {"index": 0, "id": "call_1", "type": "function",
+                 "function": {"name": "forecast", "arguments": "{\"city\":"}},
+                {"index": 1, "id": "call_2", "type": "function",
+                 "function": {"name": "clock", "arguments": "{\"zone\":\"UTC\"}"}}
+            ]}}]
+        });
+        assert!(streaming_output_tokens("gpt-4o-mini", &function_frame).unwrap() > 0);
+        assert!(streaming_output_tokens("gpt-4o-mini", &tool_frame).unwrap() > 0);
+
+        let unknown = serde_json::json!({
+            "choices": [{"delta": {"content": "", "new_billable_field": "hidden"}}]
+        });
+        assert!(streaming_output_tokens("gpt-4o-mini", &unknown).is_err());
+    }
+
+    #[test]
+    fn non_stream_tool_calls_use_usage_or_supported_local_fallback() {
+        let response = serde_json::json!({
+            "choices": [{"message": {"role": "assistant", "tool_calls": [{
+                "id": "call_1", "type": "function",
+                "function": {"name": "forecast", "arguments": "{\"city\":\"Bangkok\"}"}
+            }]}}],
+            "usage": {"completion_tokens": 17}
+        });
+        assert_eq!(
+            non_stream_output_tokens("gpt-4o-mini", &response),
+            Ok((17, "provider usage.completion_tokens"))
+        );
+
+        let mut without_usage = response;
+        without_usage.as_object_mut().unwrap().remove("usage");
+        let (tokens, source) = non_stream_output_tokens("gpt-4o-mini", &without_usage).unwrap();
+        assert!(tokens > 0);
+        assert_eq!(source, "local supported-message tokenizer fallback");
+    }
+
+    #[tokio::test]
+    async fn proxy_auth_and_mock_mode_fail_before_body_or_budget() {
+        let mut protected = test_state(0, 1.0);
+        protected.proxy_token = Some(Arc::from("proxy-secret"));
+
+        let response = call_proxy_with_body(
+            protected.clone(),
+            "auth-user",
+            Body::from("this body must not be parsed"),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            protected
+                .budget_ledger
+                .user_snapshot("auth-user")
+                .total_spend,
+            0.0
+        );
+
+        let mut wrong = proxy_headers("auth-user");
+        wrong.insert("x-kilovolt-key", HeaderValue::from_static("wrong"));
+        assert_eq!(
+            chat_completions_proxy(State(protected.clone()), wrong, proxy_body())
+                .await
+                .status(),
+            StatusCode::UNAUTHORIZED
+        );
+
+        let mut disabled = test_state(0, 1.0);
+        disabled.mock_upstream_enabled = false;
+        assert_eq!(
+            mock_chat_completions(State(disabled), HeaderMap::new(), Body::from("{}"))
+                .await
+                .status(),
+            StatusCode::NOT_FOUND
+        );
+
+        let mut mock_headers = HeaderMap::new();
+        mock_headers.insert("x-kilovolt-key", HeaderValue::from_static("proxy-secret"));
+        assert_eq!(
+            mock_chat_completions(
+                State(protected.clone()),
+                mock_headers,
+                Body::from("{\"stream\":false}")
+            )
+            .await
+            .status(),
+            StatusCode::OK
+        );
+        assert_eq!(
+            mock_chat_completions(State(protected), HeaderMap::new(), Body::from("{}"))
+                .await
+                .status(),
+            StatusCode::UNAUTHORIZED
+        );
+    }
+
+    #[tokio::test]
+    async fn unknown_model_never_contacts_upstream_or_reserves_budget() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let counted = Arc::clone(&calls);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let app = Router::new().route(
+            "/v1/chat/completions",
+            post(move || {
+                counted.fetch_add(1, Ordering::SeqCst);
+                async { StatusCode::OK }
+            }),
+        );
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let mut state = test_state(port, 1.0);
+        state.openai_upstream_url = format!("http://127.0.0.1:{port}/v1/chat/completions");
+        let mut headers = proxy_headers("unknown-model");
+        headers.remove("x-mock-upstream");
+        let body = Body::from(
+            serde_json::json!({
+                "model": "unpriced-model",
+                "messages": [{"role": "user", "content": "hello"}],
+                "stream": true
+            })
+            .to_string(),
+        );
+        let response = chat_completions_proxy(State(state.clone()), headers, body).await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            state
+                .budget_ledger
+                .user_snapshot("unknown-model")
+                .total_spend,
+            0.0
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn valid_proxy_token_is_not_forwarded_and_default_bound_is_injected() {
+        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel::<(HeaderMap, Bytes)>();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let app = Router::new().route(
+            "/v1/chat/completions",
+            post(move |headers: HeaderMap, body: Bytes| {
+                let sender = sender.clone();
+                async move {
+                    sender.send((headers, body)).unwrap();
+                    (
+                        [(axum::http::header::CONTENT_TYPE, "application/json")],
+                        "{\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":\"ok\"}}],\"usage\":{\"completion_tokens\":1}}",
+                    )
+                }
+            }),
+        );
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let mut state = test_state(port, 1.0);
+        state.openai_upstream_url = format!("http://127.0.0.1:{port}/v1/chat/completions");
+        state.proxy_token = Some(Arc::from("proxy-secret"));
+        state.non_stream_default_max_output_tokens = Some(12);
+
+        let mut missing_token_headers = proxy_headers("unauthenticated-user");
+        missing_token_headers.remove("x-mock-upstream");
+        let rejected = chat_completions_proxy(
+            State(state.clone()),
+            missing_token_headers,
+            proxy_body_with_stream(false),
+        )
+        .await;
+        assert_eq!(rejected.status(), StatusCode::UNAUTHORIZED);
+        assert!(receiver.try_recv().is_err());
+        assert_eq!(
+            state
+                .budget_ledger
+                .user_snapshot("unauthenticated-user")
+                .total_spend,
+            0.0
+        );
+
+        let mut headers = proxy_headers("authenticated-user");
+        headers.remove("x-mock-upstream");
+        headers.insert("x-kilovolt-key", HeaderValue::from_static("proxy-secret"));
+        let response =
+            chat_completions_proxy(State(state.clone()), headers, proxy_body_with_stream(false))
+                .await;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let (upstream_headers, upstream_body) = receiver.recv().await.unwrap();
+        assert!(!upstream_headers.contains_key("x-kilovolt-key"));
+        let forwarded: serde_json::Value = serde_json::from_slice(&upstream_body).unwrap();
+        assert_eq!(forwarded["max_completion_tokens"], 12);
+        assert!(
+            state
+                .budget_ledger
+                .user_snapshot("authenticated-user")
+                .committed_spend
+                > 0.0
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn missing_non_stream_bound_fails_before_upstream() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let counted = Arc::clone(&calls);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let app = Router::new().route(
+            "/v1/chat/completions",
+            post(move || {
+                counted.fetch_add(1, Ordering::SeqCst);
+                async { StatusCode::OK }
+            }),
+        );
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let mut state = test_state(port, 1.0);
+        state.openai_upstream_url = format!("http://127.0.0.1:{port}/v1/chat/completions");
+        state.non_stream_default_max_output_tokens = None;
+        let mut headers = proxy_headers("missing-bound");
+        headers.remove("x-mock-upstream");
+        let response =
+            chat_completions_proxy(State(state.clone()), headers, proxy_body_with_stream(false))
+                .await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            state
+                .budget_ledger
+                .user_snapshot("missing-bound")
+                .total_spend,
+            0.0
+        );
+        server.abort();
+    }
+
     #[tokio::test]
     async fn upstream_connection_failure_releases_prompt_reservation() {
         let state = test_state(0, 1.0);
@@ -1427,6 +2591,23 @@ mod tests {
         assert_eq!(snapshot.committed_spend, 0.0);
         assert_eq!(snapshot.reserved_spend, 0.0);
         assert_eq!(snapshot.total_spend, 0.0);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn non_stream_upstream_failure_releases_prompt_and_output_reservations() {
+        let (port, server) = spawn_mock_upstream(StatusCode::UNAUTHORIZED).await;
+        let state = test_state(port, 1.0);
+        let response = call_proxy_with_body(
+            state.clone(),
+            "non-stream-error",
+            proxy_body_with_stream(false),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        let snapshot = state.budget_ledger.user_snapshot("non-stream-error");
+        assert_eq!(snapshot.committed_spend, 0.0);
+        assert_eq!(snapshot.reserved_spend, 0.0);
         server.abort();
     }
 
@@ -1608,6 +2789,13 @@ mod tests {
                 .committed_spend,
             expected
         );
+        assert_eq!(
+            state
+                .budget_ledger
+                .user_snapshot("json-user")
+                .reserved_spend,
+            0.0
+        );
         server.abort();
     }
 
@@ -1659,11 +2847,9 @@ mod tests {
             call_proxy_with_body(state.clone(), "json-cutoff", proxy_body_with_stream(false)).await;
         assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
         assert_eq!(
-            state
-                .budget_ledger
-                .user_snapshot("json-cutoff")
-                .committed_spend,
-            prompt_cost
+            state.budget_ledger.user_snapshot("json-cutoff").total_spend,
+            0.0,
+            "the combined prompt/output reservation must fail before upstream"
         );
         server.abort();
     }
@@ -1683,6 +2869,97 @@ mod tests {
         let user = state.budget_ledger.user_snapshot("large-json");
         assert!(user.committed_spend > 0.0);
         assert_eq!(user.reserved_spend, 0.0);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn provider_usage_above_bound_commits_full_output_reservation() {
+        const UPSTREAM: &str = "{\"choices\":[{\"message\":{\"content\":\"too much\"}}],\"usage\":{\"completion_tokens\":2}}";
+        let (port, server) =
+            spawn_static_upstream(StatusCode::OK, "application/json", UPSTREAM).await;
+        let state = test_state(port, 1.0);
+        let body = Body::from(
+            serde_json::json!({
+                "model": "gpt-4o-mini",
+                "messages": [{"role": "user", "content": "test prompt"}],
+                "stream": false,
+                "max_completion_tokens": 1
+            })
+            .to_string(),
+        );
+        let response = call_proxy_with_body(state.clone(), "bound-violation", body).await;
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+        let expected = proxy_prompt_cost() + get_model_pricing("gpt-4o-mini").output_cost_per_token;
+        let user = state.budget_ledger.user_snapshot("bound-violation");
+        assert!((user.committed_spend - expected).abs() < 1e-15);
+        assert_eq!(user.reserved_spend, 0.0);
+        assert_eq!(
+            state
+                .recent_requests
+                .lock()
+                .unwrap()
+                .front()
+                .map(|record| record.status),
+            Some(502)
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn non_stream_cancellation_after_acceptance_commits_full_reservation() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let app = Router::new().route(
+            "/mock/v1/chat/completions",
+            post(|| async {
+                let body = Body::from_stream(stream::once(async {
+                    tokio::time::sleep(Duration::from_secs(5)).await;
+                    Ok::<Bytes, std::io::Error>(Bytes::from_static(
+                        b"{\"choices\":[{\"message\":{\"content\":\"late\"}}]}",
+                    ))
+                }));
+                axum::response::Response::builder()
+                    .status(StatusCode::OK)
+                    .header(axum::http::header::CONTENT_TYPE, "application/json")
+                    .body(body)
+                    .unwrap()
+            }),
+        );
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let state = test_state(port, 1.0);
+        let task_state = state.clone();
+        let task = tokio::spawn(async move {
+            call_proxy_with_body(
+                task_state,
+                "cancel-non-stream",
+                proxy_body_with_stream(false),
+            )
+            .await
+        });
+        for _ in 0..1_000 {
+            let snapshot = state.budget_ledger.user_snapshot("cancel-non-stream");
+            if snapshot.committed_spend > 0.0 && snapshot.reserved_spend > 0.0 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        let accepted = state.budget_ledger.user_snapshot("cancel-non-stream");
+        assert!(accepted.committed_spend > 0.0);
+        assert!(accepted.reserved_spend > 0.0);
+        task.abort();
+        let _ = task.await;
+        let finalized = state.budget_ledger.user_snapshot("cancel-non-stream");
+        assert_eq!(finalized.reserved_spend, 0.0);
+        assert!(finalized.committed_spend > accepted.committed_spend);
+        assert_eq!(
+            state
+                .recent_requests
+                .lock()
+                .unwrap()
+                .front()
+                .map(|record| record.status),
+            Some(499)
+        );
         server.abort();
     }
 
