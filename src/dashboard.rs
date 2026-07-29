@@ -1,12 +1,13 @@
+use crate::config::{AppState, RecentRequest};
 use axum::{
-    extract::State,
-    http::StatusCode,
-    response::{Html, IntoResponse, Response},
     Json,
+    extract::State,
+    http::{HeaderMap, StatusCode, header},
+    response::{Html, IntoResponse, Response},
 };
+use base64::{Engine as _, engine::general_purpose::STANDARD};
 use std::collections::HashMap;
 use std::sync::atomic::Ordering;
-use crate::config::{AppState, RecentRequest};
 
 // Struct for dashboard and stats API payloads
 #[derive(serde::Serialize)]
@@ -25,6 +26,8 @@ struct HealthStats {
 #[derive(serde::Serialize)]
 struct BudgetStats {
     total_tokens_consumed: usize,
+    project_budget_usd: f64,
+    current_project_spend_usd: f64,
     default_budget_usd: f64,
     recent_requests: Vec<RecentRequest>,
     current_spend_by_user: HashMap<String, f64>,
@@ -51,8 +54,83 @@ fn get_memory_usage_kb() -> usize {
     15360
 }
 
-/// REST endpoint `/api/stats` to expose server telemetry and budget state.
-pub async fn get_stats(State(state): State<AppState>) -> Response {
+fn secrets_match(expected: &str, actual: &str) -> bool {
+    if expected.len() != actual.len() {
+        return false;
+    }
+
+    expected
+        .as_bytes()
+        .iter()
+        .zip(actual.as_bytes())
+        .fold(0_u8, |difference, (left, right)| {
+            difference | (left ^ right)
+        })
+        == 0
+}
+
+fn dashboard_auth_failure(state: &AppState, headers: &HeaderMap) -> Option<Response> {
+    let Some(expected_token) = state.dashboard_token.as_deref() else {
+        return Some(
+            (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({
+                "error": "dashboard_disabled",
+                "message": "Set KILOVOLT_DASHBOARD_TOKEN and restart Kilovolt to enable the dashboard."
+            })),
+        )
+                .into_response(),
+        );
+    };
+
+    let authorized = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|authorization| {
+            if let Some(token) = authorization.strip_prefix("Bearer ") {
+                return secrets_match(expected_token, token);
+            }
+
+            let Some(encoded) = authorization.strip_prefix("Basic ") else {
+                return false;
+            };
+            let Ok(decoded) = STANDARD.decode(encoded) else {
+                return false;
+            };
+            let Ok(credentials) = std::str::from_utf8(&decoded) else {
+                return false;
+            };
+            let Some((username, password)) = credentials.split_once(':') else {
+                return false;
+            };
+            username == "kilovolt" && secrets_match(expected_token, password)
+        });
+
+    if authorized {
+        None
+    } else {
+        let mut response = (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({
+                "error": "unauthorized",
+                "message": "Dashboard authentication is required."
+            })),
+        )
+            .into_response();
+        response.headers_mut().insert(
+            header::WWW_AUTHENTICATE,
+            axum::http::HeaderValue::from_static("Basic realm=\"Kilovolt dashboard\""),
+        );
+        Some(response)
+    }
+}
+
+/// REST endpoint `/api/stats` to expose local operational and budget state.
+pub async fn get_stats(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    if let Some(response) = dashboard_auth_failure(&state, &headers) {
+        return response;
+    }
+
     let uptime = state.start_time.elapsed().as_secs();
     let memory_usage = get_memory_usage_kb();
 
@@ -69,10 +147,8 @@ pub async fn get_stats(State(state): State<AppState>) -> Response {
         list.iter().cloned().collect::<Vec<RecentRequest>>()
     };
 
-    let ledger = {
-        let map = state.spend_tracker.read().unwrap();
-        map.clone()
-    };
+    let ledger = state.budget_ledger.snapshot();
+    let project = state.budget_ledger.project_snapshot();
 
     let payload = StatsPayload {
         health: HealthStats {
@@ -82,6 +158,8 @@ pub async fn get_stats(State(state): State<AppState>) -> Response {
         },
         budget: BudgetStats {
             total_tokens_consumed: state.total_tokens_consumed.load(Ordering::Relaxed),
+            project_budget_usd: state.project_budget,
+            current_project_spend_usd: project.committed_spend,
             default_budget_usd: state.default_budget,
             recent_requests: recent,
             current_spend_by_user: ledger,
@@ -91,9 +169,13 @@ pub async fn get_stats(State(state): State<AppState>) -> Response {
     (StatusCode::OK, Json(payload)).into_response()
 }
 
-/// Route handler to render the embedded HTML dashboard.
-pub async fn get_dashboard() -> impl IntoResponse {
-    Html(DASHBOARD_HTML)
+/// Route handler to render the authenticated embedded HTML dashboard.
+pub async fn get_dashboard(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    if let Some(response) = dashboard_auth_failure(&state, &headers) {
+        return response;
+    }
+
+    Html(DASHBOARD_HTML).into_response()
 }
 
 // Embedded dashboard HTML template using Tailwind CSS via CDN and vanilla JS polling
@@ -239,6 +321,15 @@ const DASHBOARD_HTML: &str = r#"<!DOCTYPE html>
             return `$${val.toFixed(5)}`;
         }
 
+        function escapeHtml(value) {
+            return String(value)
+                .replaceAll('&', '&amp;')
+                .replaceAll('<', '&lt;')
+                .replaceAll('>', '&gt;')
+                .replaceAll('"', '&quot;')
+                .replaceAll("'", '&#039;');
+        }
+
         async function fetchStats() {
             try {
                 const response = await fetch('/api/stats');
@@ -266,7 +357,7 @@ const DASHBOARD_HTML: &str = r#"<!DOCTYPE html>
                         const statusClass = isOver ? 'text-red-400 font-bold' : 'text-green-400';
                         ledgerList.innerHTML += `
                             <div class="flex justify-between items-center bg-slate-950/80 px-3 py-1 rounded border border-slate-800/40">
-                                <span class="font-medium text-slate-400">${user}</span>
+                                <span class="font-medium text-slate-400">${escapeHtml(user)}</span>
                                 <span class="${statusClass}">${formatCost(spend)}</span>
                             </div>
                         `;
@@ -286,9 +377,9 @@ const DASHBOARD_HTML: &str = r#"<!DOCTYPE html>
                         tableBody.innerHTML += `
                             <tr class="hover:bg-slate-900/30 transition">
                                 <td class="py-3 px-4 text-slate-500 font-mono">${shortReqId}</td>
-                                <td class="py-3 px-4 text-slate-400">${req.timestamp}</td>
-                                <td class="py-3 px-4 font-bold text-slate-300">${req.user_id}</td>
-                                <td class="py-3 px-4 text-slate-400">${req.model}</td>
+                                <td class="py-3 px-4 text-slate-400">${escapeHtml(req.timestamp)}</td>
+                                <td class="py-3 px-4 font-bold text-slate-300">${escapeHtml(req.user_id)}</td>
+                                <td class="py-3 px-4 text-slate-400">${escapeHtml(req.model)}</td>
                                 <td class="py-3 px-4 text-right text-slate-300">${req.tokens.toLocaleString()}</td>
                                 <td class="py-3 px-4 text-right text-emerald-400 font-semibold">${formatCost(req.cost)}</td>
                                 <td class="py-3 px-4"><span class="px-2 py-0.5 rounded text-xs font-bold ${statusClass} bg-slate-950 border border-slate-800">${req.status}</span></td>
@@ -316,3 +407,75 @@ const DASHBOARD_HTML: &str = r#"<!DOCTYPE html>
     </script>
 </body>
 </html>"#;
+
+#[cfg(test)]
+mod tests {
+    use super::{get_dashboard, get_stats};
+    use axum::extract::State;
+    use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
+    use base64::{Engine as _, engine::general_purpose::STANDARD};
+
+    use crate::config::test_state;
+
+    fn bearer_headers(token: &str) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::AUTHORIZATION,
+            HeaderValue::from_str(&format!("Bearer {token}")).expect("valid test header"),
+        );
+        headers
+    }
+
+    #[tokio::test]
+    async fn dashboard_and_stats_reject_unauthenticated_requests() {
+        let state = test_state(0, 1.0);
+        let dashboard = get_dashboard(State(state.clone()), HeaderMap::new()).await;
+        let stats = get_stats(State(state), HeaderMap::new()).await;
+
+        assert_eq!(dashboard.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(stats.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            dashboard
+                .headers()
+                .get(header::WWW_AUTHENTICATE)
+                .and_then(|value| value.to_str().ok()),
+            Some("Basic realm=\"Kilovolt dashboard\"")
+        );
+    }
+
+    #[tokio::test]
+    async fn dashboard_and_stats_accept_bearer_authentication() {
+        let state = test_state(0, 1.0);
+        let headers = bearer_headers("test-dashboard-token");
+        let dashboard = get_dashboard(State(state.clone()), headers.clone()).await;
+        let stats = get_stats(State(state), headers).await;
+
+        assert_eq!(dashboard.status(), StatusCode::OK);
+        assert_eq!(stats.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn browser_basic_authentication_is_supported() {
+        let state = test_state(0, 1.0);
+        let credentials = STANDARD.encode("kilovolt:test-dashboard-token");
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::AUTHORIZATION,
+            HeaderValue::from_str(&format!("Basic {credentials}")).expect("valid test header"),
+        );
+
+        let dashboard = get_dashboard(State(state), headers).await;
+        assert_eq!(dashboard.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn missing_dashboard_configuration_disables_the_endpoints() {
+        let mut state = test_state(0, 1.0);
+        state.dashboard_token = None;
+
+        let dashboard = get_dashboard(State(state.clone()), HeaderMap::new()).await;
+        let stats = get_stats(State(state), HeaderMap::new()).await;
+        assert_eq!(dashboard.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(stats.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+}

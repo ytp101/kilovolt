@@ -68,9 +68,10 @@ RUN if [ "$TARGETARCH" = "arm64" ]; then \
 FROM debian:bookworm-slim
 WORKDIR /app
 
-# Install runtime certificates for HTTPS
+# Install runtime certificates and curl for the container health check
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
+    curl \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy the compiled binary from Stage 1
@@ -78,6 +79,9 @@ COPY --from=builder /usr/local/bin/kilovolt /usr/local/bin/kilovolt
 
 # Expose port
 EXPOSE 8080
+
+HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
+  CMD curl --fail --silent http://127.0.0.1:8080/health || exit 1
 
 # Execute server
 CMD ["kilovolt"]
