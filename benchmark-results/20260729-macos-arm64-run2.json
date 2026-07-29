@@ -1,0 +1,938 @@
+{
+  "schema_version": 1,
+  "timestamp_utc": "2026-07-29T02:15:17.411086+00:00",
+  "kilovolt": {
+    "commit_sha": "88aefa484ba4a1de1be3552de07ba647a2b30ede",
+    "working_tree_dirty": true,
+    "build_profile": "release",
+    "rust_version": "rustc 1.91.0 (f8297e351 2025-10-28)"
+  },
+  "environment": {
+    "operating_system": "macOS-26.5.1-arm64-arm-64bit-Mach-O",
+    "architecture": "arm64",
+    "cpu_model": "Apple M4",
+    "logical_cpu_count": 10,
+    "total_memory_bytes": 17179869184
+  },
+  "configuration": {
+    "smoke": false,
+    "concurrency_levels": [
+      1,
+      10,
+      50,
+      100
+    ],
+    "stream_events": 4,
+    "long_stream_events": 5000,
+    "large_prompt_bytes": 524288,
+    "telemetry_enabled": false,
+    "request_body_limit_bytes": 1048576,
+    "upstream_body_limit_bytes": 4194304,
+    "sse_frame_limit_bytes": 262144
+  },
+  "commands": {
+    "build": "cargo build --release",
+    "benchmark": "python3 scripts/benchmark/run.py --output benchmark-results/20260729-macos-arm64-run2.json"
+  },
+  "idle_rss_kb": 10256,
+  "results": [
+    {
+      "name": "direct-stream-c1",
+      "route": "/mock/v1/chat/completions",
+      "streaming": true,
+      "event_count": 4,
+      "concurrency": 1,
+      "warmup_requests": 10,
+      "measured_requests": 30,
+      "elapsed_seconds": 0.01503883401164785,
+      "throughput_requests_per_second": 1994.835502324479,
+      "ttfb_ms": {
+        "p50": 0.20308297825977206,
+        "p95": 0.3489580121822655,
+        "p99": 0.7104169926606119
+      },
+      "end_to_end_ms": {
+        "p50": 0.20916596986353397,
+        "p95": 0.35787501838058233,
+        "p99": 0.7242499850690365
+      },
+      "response_bytes": {
+        "min": 666,
+        "max": 666
+      },
+      "status_counts": {
+        "200": 30
+      },
+      "rss_kb": {
+        "sample_count": 1,
+        "active_median": 10656,
+        "peak": 10656
+      },
+      "cpu_percent": {
+        "sample_count": 1,
+        "mean": 1.4,
+        "peak": 1.4
+      }
+    },
+    {
+      "name": "proxied-stream-c1",
+      "route": "/v1/chat/completions",
+      "streaming": true,
+      "event_count": 4,
+      "concurrency": 1,
+      "warmup_requests": 10,
+      "measured_requests": 30,
+      "elapsed_seconds": 0.010454875009600073,
+      "throughput_requests_per_second": 2869.4747639214083,
+      "ttfb_ms": {
+        "p50": 0.2648750087246299,
+        "p95": 0.48637500731274486,
+        "p99": 1.747832982800901
+      },
+      "end_to_end_ms": {
+        "p50": 0.27137500001117587,
+        "p95": 0.4943750100210309,
+        "p99": 1.764291024301201
+      },
+      "response_bytes": {
+        "min": 666,
+        "max": 666
+      },
+      "status_counts": {
+        "200": 30
+      },
+      "rss_kb": {
+        "sample_count": 1,
+        "active_median": 63056,
+        "peak": 63056
+      },
+      "cpu_percent": {
+        "sample_count": 1,
+        "mean": 1.4,
+        "peak": 1.4
+      }
+    },
+    {
+      "name": "direct-stream-c10",
+      "route": "/mock/v1/chat/completions",
+      "streaming": true,
+      "event_count": 4,
+      "concurrency": 10,
+      "warmup_requests": 10,
+      "measured_requests": 30,
+      "elapsed_seconds": 0.0057392080198042095,
+      "throughput_requests_per_second": 5227.202062807167,
+      "ttfb_ms": {
+        "p50": 1.1178330169059336,
+        "p95": 2.1914580138400197,
+        "p99": 2.6621659635566175
+      },
+      "end_to_end_ms": {
+        "p50": 1.1238750303164124,
+        "p95": 2.1985830389894545,
+        "p99": 2.6675830013118684
+      },
+      "response_bytes": {
+        "min": 666,
+        "max": 666
+      },
+      "status_counts": {
+        "200": 30
+      },
+      "rss_kb": {
+        "sample_count": 1,
+        "active_median": 63680,
+        "peak": 63680
+      },
+      "cpu_percent": {
+        "sample_count": 1,
+        "mean": 1.4,
+        "peak": 1.4
+      }
+    },
+    {
+      "name": "proxied-stream-c10",
+      "route": "/v1/chat/completions",
+      "streaming": true,
+      "event_count": 4,
+      "concurrency": 10,
+      "warmup_requests": 10,
+      "measured_requests": 30,
+      "elapsed_seconds": 0.006275207968428731,
+      "throughput_requests_per_second": 4780.718049654025,
+      "ttfb_ms": {
+        "p50": 1.1006249696947634,
+        "p95": 2.149290987290442,
+        "p99": 2.244416973553598
+      },
+      "end_to_end_ms": {
+        "p50": 1.106125011574477,
+        "p95": 2.1568749798461795,
+        "p99": 2.2491670097224414
+      },
+      "response_bytes": {
+        "min": 666,
+        "max": 666
+      },
+      "status_counts": {
+        "200": 30
+      },
+      "rss_kb": {
+        "sample_count": 1,
+        "active_median": 63760,
+        "peak": 63760
+      },
+      "cpu_percent": {
+        "sample_count": 1,
+        "mean": 1.4,
+        "peak": 1.4
+      }
+    },
+    {
+      "name": "direct-stream-c50",
+      "route": "/mock/v1/chat/completions",
+      "streaming": true,
+      "event_count": 4,
+      "concurrency": 50,
+      "warmup_requests": 10,
+      "measured_requests": 100,
+      "elapsed_seconds": 0.014183374994900078,
+      "throughput_requests_per_second": 7050.50807977347,
+      "ttfb_ms": {
+        "p50": 2.1496249828487635,
+        "p95": 4.061667015776038,
+        "p99": 4.680750018451363
+      },
+      "end_to_end_ms": {
+        "p50": 2.1534159895963967,
+        "p95": 4.067041969392449,
+        "p99": 4.686583008151501
+      },
+      "response_bytes": {
+        "min": 666,
+        "max": 666
+      },
+      "status_counts": {
+        "200": 100
+      },
+      "rss_kb": {
+        "sample_count": 1,
+        "active_median": 64576,
+        "peak": 64576
+      },
+      "cpu_percent": {
+        "sample_count": 1,
+        "mean": 26.9,
+        "peak": 26.9
+      }
+    },
+    {
+      "name": "proxied-stream-c50",
+      "route": "/v1/chat/completions",
+      "streaming": true,
+      "event_count": 4,
+      "concurrency": 50,
+      "warmup_requests": 10,
+      "measured_requests": 100,
+      "elapsed_seconds": 0.016433792014140636,
+      "throughput_requests_per_second": 6085.022854977957,
+      "ttfb_ms": {
+        "p50": 2.337916987016797,
+        "p95": 4.788166028447449,
+        "p99": 5.3826660150662065
+      },
+      "end_to_end_ms": {
+        "p50": 2.3635830148123205,
+        "p95": 4.792082996573299,
+        "p99": 5.387082986999303
+      },
+      "response_bytes": {
+        "min": 666,
+        "max": 666
+      },
+      "status_counts": {
+        "200": 100
+      },
+      "rss_kb": {
+        "sample_count": 1,
+        "active_median": 65168,
+        "peak": 65168
+      },
+      "cpu_percent": {
+        "sample_count": 1,
+        "mean": 26.9,
+        "peak": 26.9
+      }
+    },
+    {
+      "name": "direct-stream-c100",
+      "route": "/mock/v1/chat/completions",
+      "streaming": true,
+      "event_count": 4,
+      "concurrency": 100,
+      "warmup_requests": 10,
+      "measured_requests": 200,
+      "elapsed_seconds": 0.02690387499751523,
+      "throughput_requests_per_second": 7433.873373946,
+      "ttfb_ms": {
+        "p50": 3.0374160269275308,
+        "p95": 6.15358300274238,
+        "p99": 6.982208986300975
+      },
+      "end_to_end_ms": {
+        "p50": 3.0428750324063003,
+        "p95": 6.158125004731119,
+        "p99": 6.987667002249509
+      },
+      "response_bytes": {
+        "min": 666,
+        "max": 666
+      },
+      "status_counts": {
+        "200": 200
+      },
+      "rss_kb": {
+        "sample_count": 1,
+        "active_median": 65312,
+        "peak": 65312
+      },
+      "cpu_percent": {
+        "sample_count": 1,
+        "mean": 26.9,
+        "peak": 26.9
+      }
+    },
+    {
+      "name": "proxied-stream-c100",
+      "route": "/v1/chat/completions",
+      "streaming": true,
+      "event_count": 4,
+      "concurrency": 100,
+      "warmup_requests": 10,
+      "measured_requests": 200,
+      "elapsed_seconds": 0.03106137498980388,
+      "throughput_requests_per_second": 6438.864991187655,
+      "ttfb_ms": {
+        "p50": 3.527749970089644,
+        "p95": 6.587832991499454,
+        "p99": 7.916208996903151
+      },
+      "end_to_end_ms": {
+        "p50": 3.5555000067688525,
+        "p95": 6.59354095114395,
+        "p99": 7.919833995401859
+      },
+      "response_bytes": {
+        "min": 666,
+        "max": 666
+      },
+      "status_counts": {
+        "200": 200
+      },
+      "rss_kb": {
+        "sample_count": 1,
+        "active_median": 65680,
+        "peak": 65680
+      },
+      "cpu_percent": {
+        "sample_count": 1,
+        "mean": 26.9,
+        "peak": 26.9
+      }
+    },
+    {
+      "name": "direct-json-c1",
+      "route": "/mock/v1/chat/completions",
+      "streaming": false,
+      "event_count": 4,
+      "concurrency": 1,
+      "warmup_requests": 10,
+      "measured_requests": 30,
+      "elapsed_seconds": 0.005370708997361362,
+      "throughput_requests_per_second": 5585.854682266168,
+      "ttfb_ms": {
+        "p50": 0.10779197327792645,
+        "p95": 0.23229100042954087,
+        "p99": 1.2812920031137764
+      },
+      "end_to_end_ms": {
+        "p50": 0.10983401443809271,
+        "p95": 0.23458298528566957,
+        "p99": 1.2882919982075691
+      },
+      "response_bytes": {
+        "min": 266,
+        "max": 266
+      },
+      "status_counts": {
+        "200": 30
+      },
+      "rss_kb": {
+        "sample_count": 1,
+        "active_median": 66144,
+        "peak": 66144
+      },
+      "cpu_percent": {
+        "sample_count": 1,
+        "mean": 26.9,
+        "peak": 26.9
+      }
+    },
+    {
+      "name": "proxied-json-c1",
+      "route": "/v1/chat/completions",
+      "streaming": false,
+      "event_count": 4,
+      "concurrency": 1,
+      "warmup_requests": 10,
+      "measured_requests": 30,
+      "elapsed_seconds": 0.006298166990745813,
+      "throughput_requests_per_second": 4763.290659660244,
+      "ttfb_ms": {
+        "p50": 0.14970795018598437,
+        "p95": 0.31033396953716874,
+        "p99": 1.203124993480742
+      },
+      "end_to_end_ms": {
+        "p50": 0.15154096763581038,
+        "p95": 0.31224999111145735,
+        "p99": 1.205666980240494
+      },
+      "response_bytes": {
+        "min": 266,
+        "max": 266
+      },
+      "status_counts": {
+        "200": 30
+      },
+      "rss_kb": {
+        "sample_count": 1,
+        "active_median": 66144,
+        "peak": 66144
+      },
+      "cpu_percent": {
+        "sample_count": 1,
+        "mean": 26.9,
+        "peak": 26.9
+      }
+    },
+    {
+      "name": "direct-json-c10",
+      "route": "/mock/v1/chat/completions",
+      "streaming": false,
+      "event_count": 4,
+      "concurrency": 10,
+      "warmup_requests": 10,
+      "measured_requests": 30,
+      "elapsed_seconds": 0.007106833043508232,
+      "throughput_requests_per_second": 4221.2895415354715,
+      "ttfb_ms": {
+        "p50": 1.0602499824017286,
+        "p95": 2.2059170296415687,
+        "p99": 2.5729999761097133
+      },
+      "end_to_end_ms": {
+        "p50": 1.0622909758239985,
+        "p95": 2.207375015132129,
+        "p99": 2.578167011961341
+      },
+      "response_bytes": {
+        "min": 266,
+        "max": 266
+      },
+      "status_counts": {
+        "200": 30
+      },
+      "rss_kb": {
+        "sample_count": 1,
+        "active_median": 66144,
+        "peak": 66144
+      },
+      "cpu_percent": {
+        "sample_count": 1,
+        "mean": 26.9,
+        "peak": 26.9
+      }
+    },
+    {
+      "name": "proxied-json-c10",
+      "route": "/v1/chat/completions",
+      "streaming": false,
+      "event_count": 4,
+      "concurrency": 10,
+      "warmup_requests": 10,
+      "measured_requests": 30,
+      "elapsed_seconds": 0.007506166992243379,
+      "throughput_requests_per_second": 3996.7136397313025,
+      "ttfb_ms": {
+        "p50": 1.1381660006009042,
+        "p95": 3.690832993015647,
+        "p99": 4.649124981369823
+      },
+      "end_to_end_ms": {
+        "p50": 1.139833009801805,
+        "p95": 3.6922500003129244,
+        "p99": 4.651165974792093
+      },
+      "response_bytes": {
+        "min": 266,
+        "max": 266
+      },
+      "status_counts": {
+        "200": 30
+      },
+      "rss_kb": {
+        "sample_count": 1,
+        "active_median": 66160,
+        "peak": 66160
+      },
+      "cpu_percent": {
+        "sample_count": 1,
+        "mean": 44.4,
+        "peak": 44.4
+      }
+    },
+    {
+      "name": "direct-json-c50",
+      "route": "/mock/v1/chat/completions",
+      "streaming": false,
+      "event_count": 4,
+      "concurrency": 50,
+      "warmup_requests": 10,
+      "measured_requests": 100,
+      "elapsed_seconds": 0.01401954097673297,
+      "throughput_requests_per_second": 7132.901153180509,
+      "ttfb_ms": {
+        "p50": 1.8373749917373061,
+        "p95": 3.105499956291169,
+        "p99": 3.968624980188906
+      },
+      "end_to_end_ms": {
+        "p50": 1.839042000938207,
+        "p95": 3.107416967395693,
+        "p99": 3.9705829694867134
+      },
+      "response_bytes": {
+        "min": 266,
+        "max": 266
+      },
+      "status_counts": {
+        "200": 100
+      },
+      "rss_kb": {
+        "sample_count": 1,
+        "active_median": 66160,
+        "peak": 66160
+      },
+      "cpu_percent": {
+        "sample_count": 1,
+        "mean": 44.4,
+        "peak": 44.4
+      }
+    },
+    {
+      "name": "proxied-json-c50",
+      "route": "/v1/chat/completions",
+      "streaming": false,
+      "event_count": 4,
+      "concurrency": 50,
+      "warmup_requests": 10,
+      "measured_requests": 100,
+      "elapsed_seconds": 0.015572957985568792,
+      "throughput_requests_per_second": 6421.387644702335,
+      "ttfb_ms": {
+        "p50": 2.055874967481941,
+        "p95": 5.023208039347082,
+        "p99": 5.2762909908778965
+      },
+      "end_to_end_ms": {
+        "p50": 2.057458972558379,
+        "p95": 5.024333018809557,
+        "p99": 5.277999967802316
+      },
+      "response_bytes": {
+        "min": 266,
+        "max": 266
+      },
+      "status_counts": {
+        "200": 100
+      },
+      "rss_kb": {
+        "sample_count": 1,
+        "active_median": 66176,
+        "peak": 66176
+      },
+      "cpu_percent": {
+        "sample_count": 1,
+        "mean": 44.4,
+        "peak": 44.4
+      }
+    },
+    {
+      "name": "direct-json-c100",
+      "route": "/mock/v1/chat/completions",
+      "streaming": false,
+      "event_count": 4,
+      "concurrency": 100,
+      "warmup_requests": 10,
+      "measured_requests": 200,
+      "elapsed_seconds": 0.02195974998176098,
+      "throughput_requests_per_second": 9107.57181507591,
+      "ttfb_ms": {
+        "p50": 2.3255840060301125,
+        "p95": 4.697167023550719,
+        "p99": 5.757124978117645
+      },
+      "end_to_end_ms": {
+        "p50": 2.3268339573405683,
+        "p95": 4.6989169786684215,
+        "p99": 5.758499959483743
+      },
+      "response_bytes": {
+        "min": 266,
+        "max": 266
+      },
+      "status_counts": {
+        "200": 200
+      },
+      "rss_kb": {
+        "sample_count": 1,
+        "active_median": 66208,
+        "peak": 66208
+      },
+      "cpu_percent": {
+        "sample_count": 1,
+        "mean": 44.4,
+        "peak": 44.4
+      }
+    },
+    {
+      "name": "proxied-json-c100",
+      "route": "/v1/chat/completions",
+      "streaming": false,
+      "event_count": 4,
+      "concurrency": 100,
+      "warmup_requests": 10,
+      "measured_requests": 200,
+      "elapsed_seconds": 0.027401041006669402,
+      "throughput_requests_per_second": 7298.992762768396,
+      "ttfb_ms": {
+        "p50": 2.892874996177852,
+        "p95": 5.7425000122748315,
+        "p99": 6.768375053070486
+      },
+      "end_to_end_ms": {
+        "p50": 2.8945840313099325,
+        "p95": 5.744667025282979,
+        "p99": 6.769792002160102
+      },
+      "response_bytes": {
+        "min": 266,
+        "max": 266
+      },
+      "status_counts": {
+        "200": 200
+      },
+      "rss_kb": {
+        "sample_count": 1,
+        "active_median": 66208,
+        "peak": 66208
+      },
+      "cpu_percent": {
+        "sample_count": 1,
+        "mean": 44.4,
+        "peak": 44.4
+      }
+    },
+    {
+      "name": "direct-long-stream",
+      "route": "/mock/v1/chat/completions",
+      "streaming": true,
+      "event_count": 5000,
+      "concurrency": 1,
+      "warmup_requests": 1,
+      "measured_requests": 3,
+      "elapsed_seconds": 0.009972708008717746,
+      "throughput_requests_per_second": 300.82100041207656,
+      "ttfb_ms": {
+        "p50": 0.23750000400468707,
+        "p95": 1.6450409893877804,
+        "p99": 1.6450409893877804
+      },
+      "end_to_end_ms": {
+        "p50": 2.6629590429365635,
+        "p95": 4.42625000141561,
+        "p99": 4.42625000141561
+      },
+      "response_bytes": {
+        "min": 828904,
+        "max": 828904
+      },
+      "status_counts": {
+        "200": 3
+      },
+      "rss_kb": {
+        "sample_count": 1,
+        "active_median": 66224,
+        "peak": 66224
+      },
+      "cpu_percent": {
+        "sample_count": 1,
+        "mean": 44.4,
+        "peak": 44.4
+      }
+    },
+    {
+      "name": "proxied-long-stream",
+      "route": "/v1/chat/completions",
+      "streaming": true,
+      "event_count": 5000,
+      "concurrency": 1,
+      "warmup_requests": 1,
+      "measured_requests": 3,
+      "elapsed_seconds": 0.06525833299383521,
+      "throughput_requests_per_second": 45.97114057883462,
+      "ttfb_ms": {
+        "p50": 0.7554999901913106,
+        "p95": 3.5500830272212625,
+        "p99": 3.5500830272212625
+      },
+      "end_to_end_ms": {
+        "p50": 21.370916976593435,
+        "p95": 22.955290973186493,
+        "p99": 22.955290973186493
+      },
+      "response_bytes": {
+        "min": 828904,
+        "max": 828904
+      },
+      "status_counts": {
+        "200": 3
+      },
+      "rss_kb": {
+        "sample_count": 2,
+        "active_median": 66224.0,
+        "peak": 66224
+      },
+      "cpu_percent": {
+        "sample_count": 2,
+        "mean": 58.7,
+        "peak": 58.7
+      }
+    },
+    {
+      "name": "direct-large-prompt",
+      "route": "/mock/v1/chat/completions",
+      "streaming": false,
+      "event_count": 4,
+      "concurrency": 1,
+      "warmup_requests": 1,
+      "measured_requests": 10,
+      "elapsed_seconds": 0.0045002499828115106,
+      "throughput_requests_per_second": 2222.0987807776282,
+      "ttfb_ms": {
+        "p50": 0.2705410006456077,
+        "p95": 1.5424160519614816,
+        "p99": 1.5424160519614816
+      },
+      "end_to_end_ms": {
+        "p50": 0.2720830379985273,
+        "p95": 1.546291052363813,
+        "p99": 1.546291052363813
+      },
+      "response_bytes": {
+        "min": 266,
+        "max": 266
+      },
+      "status_counts": {
+        "200": 10
+      },
+      "rss_kb": {
+        "sample_count": 1,
+        "active_median": 66896,
+        "peak": 66896
+      },
+      "cpu_percent": {
+        "sample_count": 1,
+        "mean": 58.7,
+        "peak": 58.7
+      }
+    },
+    {
+      "name": "proxied-large-prompt",
+      "route": "/v1/chat/completions",
+      "streaming": false,
+      "event_count": 4,
+      "concurrency": 1,
+      "warmup_requests": 1,
+      "measured_requests": 10,
+      "elapsed_seconds": 0.260738416982349,
+      "throughput_requests_per_second": 38.3526145312026,
+      "ttfb_ms": {
+        "p50": 25.223166041541845,
+        "p95": 28.34287495352328,
+        "p99": 28.34287495352328
+      },
+      "end_to_end_ms": {
+        "p50": 25.228708051145077,
+        "p95": 28.350249980576336,
+        "p99": 28.350249980576336
+      },
+      "response_bytes": {
+        "min": 266,
+        "max": 266
+      },
+      "status_counts": {
+        "200": 10
+      },
+      "rss_kb": {
+        "sample_count": 5,
+        "active_median": 95760,
+        "peak": 95760
+      },
+      "cpu_percent": {
+        "sample_count": 5,
+        "mean": 79.5,
+        "peak": 88.1
+      }
+    },
+    {
+      "name": "preflight-budget-rejection",
+      "route": "/v1/chat/completions",
+      "streaming": true,
+      "event_count": 4,
+      "concurrency": 10,
+      "warmup_requests": 2,
+      "measured_requests": 100,
+      "elapsed_seconds": 0.014362291956786066,
+      "throughput_requests_per_second": 6962.677008717318,
+      "ttfb_ms": {
+        "p50": 1.0606669820845127,
+        "p95": 1.8736249767243862,
+        "p99": 2.350958005990833
+      },
+      "end_to_end_ms": {
+        "p50": 1.0624999995343387,
+        "p95": 1.8755419878289104,
+        "p99": 2.353082993067801
+      },
+      "response_bytes": {
+        "min": 103,
+        "max": 103
+      },
+      "status_counts": {
+        "429": 100
+      },
+      "rss_kb": {
+        "sample_count": 1,
+        "active_median": 61760,
+        "peak": 61760
+      },
+      "cpu_percent": {
+        "sample_count": 1,
+        "mean": 1.5,
+        "peak": 1.5
+      }
+    },
+    {
+      "name": "mid-stream-budget-cutoff",
+      "route": "/v1/chat/completions",
+      "streaming": true,
+      "event_count": 100,
+      "concurrency": 1,
+      "warmup_requests": 1,
+      "measured_requests": 10,
+      "elapsed_seconds": 0.005538750032428652,
+      "throughput_requests_per_second": 1805.461510530592,
+      "ttfb_ms": {
+        "p50": 0.361250014975667,
+        "p95": 1.8047919729724526,
+        "p99": 1.8047919729724526
+      },
+      "end_to_end_ms": {
+        "p50": 0.37583295488730073,
+        "p95": 1.8113750265911222,
+        "p99": 1.8113750265911222
+      },
+      "response_bytes": {
+        "min": 163,
+        "max": 163
+      },
+      "status_counts": {
+        "200": 10
+      },
+      "rss_kb": {
+        "sample_count": 1,
+        "active_median": 62992,
+        "peak": 62992
+      },
+      "cpu_percent": {
+        "sample_count": 1,
+        "mean": 0.9,
+        "peak": 0.9
+      }
+    }
+  ],
+  "paired_proxy_overhead": [
+    {
+      "workload": "stream-c1",
+      "ttfb_p50_added_ms": 0.06179203046485782,
+      "end_to_end_p50_added_ms": 0.0622090301476419,
+      "throughput_difference_requests_per_second": 874.6392615969294
+    },
+    {
+      "workload": "stream-c10",
+      "ttfb_p50_added_ms": -0.017208047211170197,
+      "end_to_end_p50_added_ms": -0.01775001874193549,
+      "throughput_difference_requests_per_second": -446.48401315314186
+    },
+    {
+      "workload": "stream-c50",
+      "ttfb_p50_added_ms": 0.1882920041680336,
+      "end_to_end_p50_added_ms": 0.2101670252159238,
+      "throughput_difference_requests_per_second": -965.4852247955132
+    },
+    {
+      "workload": "stream-c100",
+      "ttfb_p50_added_ms": 0.49033394316211343,
+      "end_to_end_p50_added_ms": 0.5126249743625522,
+      "throughput_difference_requests_per_second": -995.0083827583458
+    },
+    {
+      "workload": "json-c1",
+      "ttfb_p50_added_ms": 0.04191597690805793,
+      "end_to_end_p50_added_ms": 0.04170695319771767,
+      "throughput_difference_requests_per_second": -822.564022605924
+    },
+    {
+      "workload": "json-c10",
+      "ttfb_p50_added_ms": 0.0779160181991756,
+      "end_to_end_p50_added_ms": 0.07754203397780657,
+      "throughput_difference_requests_per_second": -224.575901804169
+    },
+    {
+      "workload": "json-c50",
+      "ttfb_p50_added_ms": 0.21849997574463487,
+      "end_to_end_p50_added_ms": 0.21841697162017226,
+      "throughput_difference_requests_per_second": -711.5135084781741
+    },
+    {
+      "workload": "json-c100",
+      "ttfb_p50_added_ms": 0.5672909901477396,
+      "end_to_end_p50_added_ms": 0.5677500739693642,
+      "throughput_difference_requests_per_second": -1808.5790523075138
+    },
+    {
+      "workload": "long-stream",
+      "ttfb_p50_added_ms": 0.5179999861866236,
+      "end_to_end_p50_added_ms": 18.70795793365687,
+      "throughput_difference_requests_per_second": -254.84985983324194
+    },
+    {
+      "workload": "large-prompt",
+      "ttfb_p50_added_ms": 24.952625040896237,
+      "end_to_end_p50_added_ms": 24.95662501314655,
+      "throughput_difference_requests_per_second": -2183.7461662464257
+    }
+  ]
+}

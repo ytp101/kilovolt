@@ -1,246 +1,86 @@
-# Kilovolt (kvlt) - API Integration & Usage Guide
+# API usage
 
-Kilovolt behaves as a drop-in replacement for standard OpenAI-compatible API gateways. By redirecting your client library's base URL to your Kilovolt proxy server and sending a custom identity header (`X-User-ID`), you instantly equip your application with zero-copy stream piping and the Bankruptcy Shield circuit breaker.
+This page is the route-level reference. Start with the
+[configuration reference](configuration.md), [security model](security.md), and
+[cookbook](cookbook/README.md).
 
----
+## `GET /health`
 
-## 📌 API Reference
+Public liveness probe:
 
-### 1. Health Check
-* **Route**: `GET /health`
-* **Description**: Verifies that the gateway is running and ready to handle traffic.
-* **Response**: `200 OK` (Body: `"OK"`)
+```text
+HTTP/1.1 200 OK
 
-### 2. Chat Completions
-* **Route**: `POST /v1/chat/completions`
-* **Description**: Proxies standard chat completion payloads upstream.
-* **Headers**:
-  * `Authorization`: `Bearer <API_KEY>` (Passed upstream to the target provider).
-  * `Content-Type`: `application/json` (Required).
-  * `X-User-ID`: `<USER_ID>` (Identity tracking key for the circuit breaker. Defaults to `"anonymous"` if missing).
-  * `X-Mock-Upstream`: `true` (Optional: routes the request internally to Kilovolt's mock SSE stream for offline testing).
-* **Payload**: Any valid OpenAI-compatible chat completions payload (supports `"stream": true` and `"stream": false`).
+OK
+```
 
----
+## `POST /v1/chat/completions`
 
-## 💻 Integration Examples
+Required headers:
 
-### 1. Curl
+```text
+Authorization: Bearer <provider credential>
+Content-Type: application/json
+```
 
-#### Standard Request (No Streaming)
+Recommended trusted identity header:
+
+```text
+X-User-ID: <authenticated backend user ID>
+```
+
+`X-User-ID` is not authenticated by Kilovolt. It must be inserted by the
+founder's backend after authentication and must not be accepted from an
+untrusted browser/mobile client. If missing, all such requests share the
+`anonymous` budget.
+
+The request must contain a string `model`, a `messages` array, and optional
+boolean `stream` (default `false`). The body is limited by
+`KILOVOLT_MAX_REQUEST_BODY_BYTES`.
+
+### Streaming
+
 ```bash
-curl -X POST http://127.0.0.1:8080/v1/chat/completions \
-  -H "Authorization: Bearer sk-proj-your-openai-key" \
-  -H "Content-Type: application/json" \
-  -H "X-User-ID: developer_alice" \
-  -d '{
-    "model": "gpt-4o",
-    "messages": [
-      {"role": "user", "content": "Explain async streams in 10 words."}
-    ],
-    "stream": false
-  }'
+curl --no-buffer \
+  -H "Authorization: Bearer ${OPENAI_API_KEY}" \
+  -H 'Content-Type: application/json' \
+  -H 'X-User-ID: user-42' \
+  --data '{"model":"gpt-4o-mini","messages":[{"role":"user","content":"Hello"}],"stream":true}' \
+  http://127.0.0.1:8080/v1/chat/completions
 ```
 
-#### Streaming Request (Server-Sent Events)
-Use the `-N` flag to disable curl's output buffering, enabling you to inspect the token stream in real-time:
+A successful compatible upstream must return `text/event-stream`. Kilovolt
+reconstructs and validates bounded events, charges supported text before
+forwarding each event, and recognizes `[DONE]`. If a later charge is rejected,
+the already-sent HTTP status stays `200`, forwarding stops, and the local
+request record is `429`.
+
+### Non-streaming
+
 ```bash
-curl -i -N -X POST http://127.0.0.1:8080/v1/chat/completions \
-  -H "Authorization: Bearer sk-proj-your-openai-key" \
-  -H "Content-Type: application/json" \
-  -H "X-User-ID: developer_alice" \
-  -d '{
-    "model": "gpt-4o",
-    "messages": [
-      {"role": "user", "content": "Write a short poem about lightning."}
-    ],
-    "stream": true
-  }'
+curl \
+  -H "Authorization: Bearer ${OPENAI_API_KEY}" \
+  -H 'Content-Type: application/json' \
+  -H 'X-User-ID: user-42' \
+  --data '{"model":"gpt-4o-mini","messages":[{"role":"user","content":"Hello"}],"stream":false}' \
+  http://127.0.0.1:8080/v1/chat/completions
 ```
 
----
+A successful upstream must return bounded `application/json`. Kilovolt uses
+supported integer `usage.completion_tokens` or tokenizes complete supported
+message content as fallback, charges the output, then returns the original JSON
+bytes.
 
-### 2. Python (using `openai` SDK)
+Gemini translation requires `stream=true`.
 
-To integrate Kilovolt into a Python AI application, initialize the `OpenAI` client with a custom `base_url` and pass the `X-User-ID` header in `extra_headers`:
+## Errors
 
-```python
-import os
-from openai import OpenAI
+Kilovolt-generated errors use:
 
-# Initialize the OpenAI client pointing to the Kilovolt proxy gateway
-client = OpenAI(
-    api_key=os.environ.get("OPENAI_API_KEY", "your-openai-api-key"),
-    base_url="http://127.0.0.1:8080/v1"
-)
-
-# Call the API with the Bankruptcy Shield header
-try:
-    response = client.chat.completions.create(
-        model="gpt-4o",
-        messages=[
-            {"role": "user", "content": "Why is Rust so memory efficient?"}
-        ],
-        stream=True,
-        extra_headers={"X-User-ID": "developer_bob"} # Identifies the user for budget tracking
-    )
-
-    for chunk in response:
-        content = chunk.choices[0].delta.content
-        if content:
-            print(content, end="", flush=True)
-            
-except Exception as e:
-    # Captures 429 Budget Exceeded and network errors
-    print(f"\nAPI Error: {e}")
-```
-
----
-
-### 3. Node.js / JavaScript (using `@openai/api` SDK)
-
-For Node.js backends or frontend clients:
-
-```javascript
-const { OpenAI } = require('openai');
-
-const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY || 'your-openai-api-key',
-  baseURL: 'http://127.0.0.1:8080/v1',
-});
-
-async function main() {
-  try {
-    const stream = await openai.chat.completions.create({
-      model: 'gpt-4o',
-      messages: [{ role: 'user', content: 'What is O(1) memory complexity?' }],
-      stream: true,
-    }, {
-      // Pass the user tracking ID
-      headers: {
-        'X-User-ID': 'developer_charlie',
-      }
-    });
-
-    for await (const chunk of stream) {
-      process.stdout.write(chunk.choices[0]?.delta?.content || '');
-    }
-  } catch (err) {
-    console.error('\nAPI Failed:', err.message);
-  }
-}
-
-main();
-```
-
----
-
-### 4. Go (using standard HTTP client)
-
-```go
-package main
-
-import (
-	"bufio"
-	"bytes"
-	"fmt"
-	"net/http"
-)
-
-func main() {
-	jsonData := []byte(`{
-		"model": "gpt-4o",
-		"messages": [{"role": "user", "content": "Hello"}],
-		"stream": true
-	}`)
-
-	req, err := http.NewRequest("POST", "http://127.0.0.1:8080/v1/chat/completions", bytes.NewBuffer(jsonData))
-	if err != nil {
-		panic(err)
-	}
-
-	req.Header.Set("Authorization", "Bearer your-api-key")
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-User-ID", "developer_david")
-
-	client := &http.Client{}
-	resp, err := client.Do(req)
-	if err != nil {
-		panic(err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		fmt.Printf("Error: status %d\n", resp.StatusCode)
-		return
-	}
-
-	reader := bufio.NewReader(resp.Body)
-	for {
-		line, err := reader.ReadString('\n')
-		if err != nil {
-			break
-		}
-		fmt.Print(line)
-	}
-}
-```
-
----
-
-### 5. Rust (using `reqwest` and `futures`)
-
-```rust
-use futures_util::StreamExt;
-use reqwest::Client;
-use serde_json::json;
-
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let client = Client::new();
-    let payload = json!({
-        "model": "gpt-4o",
-        "messages": [{"role": "user", "content": "Hello!"}],
-        "stream": true
-    });
-
-    let mut response = client
-        .post("http://127.0.0.1:8080/v1/chat/completions")
-        .header("Authorization", "Bearer your-api-key")
-        .header("Content-Type", "application/json")
-        .header("X-User-ID", "developer_elena")
-        .json(&payload)
-        .send()
-        .await?;
-
-    if response.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
-        let err_json: serde_json::Value = response.json().await?;
-        println!("Circuit Breaker Tripped: {:?}", err_json);
-        return Ok(());
-    }
-
-    let mut stream = response.bytes_stream();
-    while let Some(chunk) = stream.next().await {
-        let bytes = chunk?;
-        print!("{}", String::from_utf8_lossy(&bytes));
-    }
-
-    Ok(())
-}
-```
-
----
-
-## 🛑 Error & Circuit Breaker Schemas
-
-When Kilovolt blocks a request due to authorization errors, bad headers, or exceeded budgets, it returns standard HTTP error codes formatted to match OpenAI's structured error format.
-
-### 1. Budget Exceeded (`429 Too Many Requests`)
-Tripped when the user's total aggregate spend reaches or exceeds the dynamically loaded `KILOVOLT_DEFAULT_BUDGET` variable:
 ```json
 {
   "error": {
-    "message": "Budget Exceeded",
+    "message": "User Budget Exceeded",
     "type": "requests",
     "param": null,
     "code": "budget_exceeded"
@@ -248,28 +88,32 @@ Tripped when the user's total aggregate spend reaches or exceeds the dynamically
 }
 ```
 
-### 2. Unauthorized (`401 Unauthorized`)
-Returned if the `Authorization` header is missing, is invalid UTF-8, or does not begin with `"Bearer "`:
-```json
-{
-  "error": {
-    "message": "Authorization header must start with 'Bearer '",
-    "type": "invalid_request_error",
-    "param": null,
-    "code": "invalid_api_key"
-  }
-}
+| Status | Meaning |
+|---:|---|
+| `400` | Invalid request headers/JSON or unsupported response mode. |
+| `401` | Missing/malformed proxy authorization or dashboard authentication. |
+| `413` | Request body exceeded the configured maximum. |
+| `429` | Token gate, project budget, or user budget rejected the next operation. |
+| `499` | Internal dashboard record for downstream cancellation; not normally an HTTP response. |
+| `502` | Upstream connection/body/protocol/content-type failure. |
+| `503` | Dashboard token is not configured. |
+| `504` | Upstream response headers timed out. |
+
+Non-success upstream statuses and bounded bodies are preserved. They release
+the prompt reservation.
+
+## Dashboard routes
+
+`GET /dashboard` and `GET /api/stats` require either browser Basic auth
+(`kilovolt` / `KILOVOLT_DASHBOARD_TOKEN`) or:
+
+```bash
+curl -H "Authorization: Bearer ${KILOVOLT_DASHBOARD_TOKEN}" \
+  http://127.0.0.1:8080/api/stats
 ```
 
-### 3. Missing Content-Type (`400 Bad Request`)
-Returned if `Content-Type` is missing or is not `application/json`:
-```json
-{
-  "error": {
-    "message": "Content-Type must be application/json",
-    "type": "invalid_request_error",
-    "param": null,
-    "code": null
-  }
-}
-```
+## Test-only mock
+
+`POST /mock/v1/chat/completions` returns deterministic streaming or JSON output.
+`X-Mock-Upstream: true` routes the main proxy to it. `X-Mock-Events` and
+`X-Mock-Delay-Ms` control bounded mock behavior. Keep this route private.

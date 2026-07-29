@@ -1,22 +1,27 @@
-mod config;
 mod budget;
+mod config;
 mod dashboard;
+mod ledger;
 mod proxy;
 
 use axum::{
-    routing::{get, post},
     Router,
+    routing::{get, post},
 };
+use sha2::{Digest, Sha256};
 use std::collections::{HashMap, VecDeque};
-use std::sync::{Arc, Mutex, RwLock};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::Instant;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
-use sha2::{Sha256, Digest};
 
-use crate::config::AppState;
+use crate::config::{
+    AppState, DEFAULT_MAX_REQUEST_BODY_BYTES, DEFAULT_MAX_SSE_FRAME_BYTES,
+    DEFAULT_MAX_UPSTREAM_BODY_BYTES, DEFAULT_TELEMETRY_URL, TelemetryConfig,
+};
 use crate::dashboard::{get_dashboard, get_stats};
+use crate::ledger::BudgetLedger;
 use crate::proxy::{chat_completions_proxy, mock_chat_completions};
 
 /// Simple health check probe.
@@ -56,34 +61,33 @@ fn get_or_create_client_hash() -> String {
 }
 
 /// One-time startup check-in telemetry payload sender.
-async fn send_startup_telemetry(client: reqwest::Client, client_hash: String) {
+async fn send_startup_telemetry(
+    client: reqwest::Client,
+    client_hash: String,
+    telemetry_endpoint: String,
+) {
     let current_version = env!("CARGO_PKG_VERSION");
     let os = std::env::consts::OS.to_string();
-    
+
     // Normalize CPU architectures
     let arch = match std::env::consts::ARCH {
         "x86_64" => "amd64",
         "aarch64" => "arm64",
         other => other,
-    }.to_string();
+    }
+    .to_string();
 
-    let telemetry_endpoint = std::env::var("KILOVOLT_TELEMETRY_URL")
-        .unwrap_or_else(|_| "https://kilovolt.vercel.app/v1/update-check".to_string());
-
-    info!("Sending startup telemetry check-in to {}...", telemetry_endpoint);
+    info!(
+        "Sending startup telemetry check-in to {}...",
+        telemetry_endpoint
+    );
 
     let is_docker = std::path::Path::new("/.dockerenv").exists();
 
-    let payload = serde_json::json!({
-        "type": "startup",
-        "client_hash": client_hash,
-        "version": current_version,
-        "is_docker": is_docker,
-        "os": os,
-        "arch": arch
-    });
+    let payload = startup_telemetry_payload(&client_hash, current_version, is_docker, &os, &arch);
 
-    match client.post(&telemetry_endpoint)
+    match client
+        .post(&telemetry_endpoint)
         .json(&payload)
         .timeout(std::time::Duration::from_secs(5))
         .send()
@@ -112,13 +116,36 @@ async fn send_startup_telemetry(client: reqwest::Client, client_hash: String) {
                     }
                 }
             } else {
-                info!("Telemetry startup check-in returned status: {}", res.status());
+                info!(
+                    "Telemetry startup check-in returned status: {}",
+                    res.status()
+                );
             }
         }
         Err(e) => {
-            info!("Failed to complete startup telemetry check-in (endpoint unreachable): {:?}", e);
+            info!(
+                "Failed to complete startup telemetry check-in (endpoint unreachable): {:?}",
+                e
+            );
         }
     }
+}
+
+fn startup_telemetry_payload(
+    client_hash: &str,
+    version: &str,
+    is_docker: bool,
+    os: &str,
+    arch: &str,
+) -> serde_json::Value {
+    serde_json::json!({
+        "type": "startup",
+        "client_hash": client_hash,
+        "version": version,
+        "is_docker": is_docker,
+        "os": os,
+        "arch": arch
+    })
 }
 
 /// 24-hour loop for running daily MAPD telemetry reports.
@@ -134,37 +161,53 @@ async fn run_daily_telemetry_loop(state: AppState) {
         let total_requests = state.total_requests.load(Ordering::Relaxed);
         let total_tokens = state.total_tokens_consumed.load(Ordering::Relaxed);
 
-        let total_users = {
-            let map = state.spend_tracker.read().unwrap();
-            map.len()
-        };
+        let total_users = state.budget_ledger.snapshot().len();
 
         let model_distribution = {
             let counts = state.model_counts.read().unwrap();
             counts.clone()
         };
 
-        let telemetry_endpoint = std::env::var("KILOVOLT_TELEMETRY_URL")
-            .unwrap_or_else(|_| "https://kilovolt.vercel.app/v1/update-check".to_string());
+        info!(
+            "Sending 24hr cycle MAPD telemetry check-in to {}...",
+            state.telemetry.endpoint
+        );
 
-        info!("Sending 24hr cycle MAPD telemetry check-in to {}...", telemetry_endpoint);
+        let payload = daily_telemetry_payload(
+            &client_hash,
+            current_version,
+            total_requests,
+            total_tokens,
+            total_users,
+            model_distribution,
+        );
 
-        let payload = serde_json::json!({
-            "type": "daily_mapd",
-            "client_hash": client_hash,
-            "version": current_version,
-            "total_requests": total_requests,
-            "total_tokens": total_tokens,
-            "total_users": total_users,
-            "model_distribution": model_distribution
-        });
-
-        let _ = client.post(&telemetry_endpoint)
+        let _ = client
+            .post(&state.telemetry.endpoint)
             .json(&payload)
             .timeout(std::time::Duration::from_secs(5))
             .send()
             .await;
     }
+}
+
+fn daily_telemetry_payload(
+    client_hash: &str,
+    version: &str,
+    total_requests: usize,
+    total_tokens: usize,
+    total_users: usize,
+    model_distribution: HashMap<String, usize>,
+) -> serde_json::Value {
+    serde_json::json!({
+        "type": "daily_mapd",
+        "client_hash": client_hash,
+        "version": version,
+        "total_requests": total_requests,
+        "total_tokens": total_tokens,
+        "total_users": total_users,
+        "model_distribution": model_distribution
+    })
 }
 
 /// Helper function to listen for SIGINT or SIGTERM signals and begin graceful draining.
@@ -194,6 +237,20 @@ async fn shutdown_signal() {
     info!("Shutdown signal received. Starting graceful connection draining...");
 }
 
+fn parse_bool(raw: Option<&str>, default: bool) -> bool {
+    match raw.map(str::trim).map(str::to_ascii_lowercase).as_deref() {
+        Some("1" | "true" | "yes" | "on") => true,
+        Some("0" | "false" | "no" | "off") => false,
+        _ => default,
+    }
+}
+
+fn parse_positive_size(raw: Option<&str>, default: usize) -> usize {
+    raw.and_then(|value| value.trim().parse::<usize>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(default)
+}
+
 #[tokio::main]
 async fn main() {
     // Load environment variables from a `.env` file if present
@@ -221,6 +278,11 @@ async fn main() {
         .and_then(|s| s.parse::<f64>().ok())
         .unwrap_or(1.00);
 
+    let project_budget = std::env::var("KILOVOLT_PROJECT_BUDGET")
+        .ok()
+        .and_then(|s| s.parse::<f64>().ok())
+        .unwrap_or(default_budget);
+
     let per_step_tokens = std::env::var("KILOVOLT_PER_STEP_TOKENS")
         .ok()
         .and_then(|s| s.parse::<usize>().ok());
@@ -233,9 +295,95 @@ async fn main() {
         .ok()
         .and_then(|s| s.parse::<usize>().ok());
 
+    let request_body_limit_raw = std::env::var("KILOVOLT_MAX_REQUEST_BODY_BYTES").ok();
+    let max_request_body_bytes = parse_positive_size(
+        request_body_limit_raw.as_deref(),
+        DEFAULT_MAX_REQUEST_BODY_BYTES,
+    );
+    if request_body_limit_raw.is_some()
+        && request_body_limit_raw
+            .as_deref()
+            .and_then(|value| value.trim().parse::<usize>().ok())
+            .filter(|value| *value > 0)
+            .is_none()
+    {
+        warn!(
+            default = DEFAULT_MAX_REQUEST_BODY_BYTES,
+            "Invalid KILOVOLT_MAX_REQUEST_BODY_BYTES; using the safe default"
+        );
+    }
+
+    let upstream_body_limit_raw = std::env::var("KILOVOLT_MAX_UPSTREAM_BODY_BYTES").ok();
+    let max_upstream_body_bytes = parse_positive_size(
+        upstream_body_limit_raw.as_deref(),
+        DEFAULT_MAX_UPSTREAM_BODY_BYTES,
+    );
+    if upstream_body_limit_raw.is_some()
+        && upstream_body_limit_raw
+            .as_deref()
+            .and_then(|value| value.trim().parse::<usize>().ok())
+            .filter(|value| *value > 0)
+            .is_none()
+    {
+        warn!(
+            default = DEFAULT_MAX_UPSTREAM_BODY_BYTES,
+            "Invalid KILOVOLT_MAX_UPSTREAM_BODY_BYTES; using the safe default"
+        );
+    }
+
+    let sse_frame_limit_raw = std::env::var("KILOVOLT_MAX_SSE_FRAME_BYTES").ok();
+    let max_sse_frame_bytes =
+        parse_positive_size(sse_frame_limit_raw.as_deref(), DEFAULT_MAX_SSE_FRAME_BYTES);
+    if sse_frame_limit_raw.is_some()
+        && sse_frame_limit_raw
+            .as_deref()
+            .and_then(|value| value.trim().parse::<usize>().ok())
+            .filter(|value| *value > 0)
+            .is_none()
+    {
+        warn!(
+            default = DEFAULT_MAX_SSE_FRAME_BYTES,
+            "Invalid KILOVOLT_MAX_SSE_FRAME_BYTES; using the safe default"
+        );
+    }
+
+    let dashboard_token = std::env::var("KILOVOLT_DASHBOARD_TOKEN")
+        .ok()
+        .filter(|token| !token.is_empty())
+        .map(Arc::<str>::from);
+    if dashboard_token.is_none() {
+        warn!("Customer dashboard disabled: set KILOVOLT_DASHBOARD_TOKEN and restart to enable it");
+    }
+
+    let telemetry_enabled = parse_bool(
+        std::env::var("KILOVOLT_TELEMETRY_ENABLED").ok().as_deref(),
+        false,
+    );
+    let telemetry = TelemetryConfig {
+        enabled: telemetry_enabled,
+        endpoint: std::env::var("KILOVOLT_TELEMETRY_URL")
+            .unwrap_or_else(|_| DEFAULT_TELEMETRY_URL.to_string()),
+    };
+    let openai_upstream_url = std::env::var("KILOVOLT_OPENAI_UPSTREAM_URL")
+        .unwrap_or_else(|_| "https://api.openai.com/v1/chat/completions".to_string());
+    let upstream_header_timeout_seconds = parse_positive_size(
+        std::env::var("KILOVOLT_UPSTREAM_HEADER_TIMEOUT_SECONDS")
+            .ok()
+            .as_deref(),
+        30,
+    ) as u64;
+
     info!(
         port = %port,
+        project_budget = %project_budget,
         default_budget = %default_budget,
+        max_request_body_bytes = %max_request_body_bytes,
+        max_upstream_body_bytes = %max_upstream_body_bytes,
+        max_sse_frame_bytes = %max_sse_frame_bytes,
+        dashboard_enabled = %dashboard_token.is_some(),
+        company_telemetry_enabled = %telemetry.enabled,
+        openai_upstream_url = %openai_upstream_url,
+        upstream_header_timeout_seconds = %upstream_header_timeout_seconds,
         per_step_tokens = ?per_step_tokens,
         per_pipeline_tokens = ?per_pipeline_tokens,
         per_day_tokens = ?per_day_tokens,
@@ -248,18 +396,30 @@ async fn main() {
         .build()
         .expect("Failed to build reqwest client");
 
-    // Initialize global shared in-memory spend tracker state
-    let spend_tracker = Arc::new(RwLock::new(HashMap::new()));
-    
+    // Initialize the atomic financial budget ledger.
+    let budget_ledger = Arc::new(BudgetLedger::new());
+
     // Retrieve or create client identity hash
-    let client_hash = get_or_create_client_hash();
+    let client_hash = if telemetry.enabled {
+        get_or_create_client_hash()
+    } else {
+        "telemetry-disabled".to_string()
+    };
     let model_counts = Arc::new(RwLock::new(HashMap::new()));
 
     let state = AppState {
         client: client.clone(),
-        spend_tracker,
+        budget_ledger,
+        project_budget,
         default_budget,
         port,
+        openai_upstream_url,
+        upstream_header_timeout: std::time::Duration::from_secs(upstream_header_timeout_seconds),
+        max_request_body_bytes,
+        max_upstream_body_bytes,
+        max_sse_frame_bytes,
+        dashboard_token,
+        telemetry: telemetry.clone(),
         per_step_tokens,
         per_pipeline_tokens,
         per_day_tokens,
@@ -275,18 +435,19 @@ async fn main() {
         model_counts,
     };
 
-    // Spawn startup check-in task
-    let startup_client = client.clone();
-    let startup_hash = client_hash.clone();
-    tokio::spawn(async move {
-        send_startup_telemetry(startup_client, startup_hash).await;
-    });
+    if telemetry.enabled {
+        let startup_client = client.clone();
+        let startup_hash = client_hash.clone();
+        let startup_endpoint = telemetry.endpoint.clone();
+        tokio::spawn(async move {
+            send_startup_telemetry(startup_client, startup_hash, startup_endpoint).await;
+        });
 
-    // Spawn 24h cycle metrics loop
-    let daily_state = state.clone();
-    tokio::spawn(async move {
-        run_daily_telemetry_loop(daily_state).await;
-    });
+        let daily_state = state.clone();
+        tokio::spawn(async move {
+            run_daily_telemetry_loop(daily_state).await;
+        });
+    }
 
     // Build the Axum Router
     let app = Router::new()
@@ -326,4 +487,62 @@ async fn main() {
     }
 
     info!("Graceful connection drain complete. Server shut down cleanly.");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        daily_telemetry_payload, parse_bool, parse_positive_size, startup_telemetry_payload,
+    };
+    use std::collections::HashMap;
+
+    #[test]
+    fn safe_size_configuration_uses_default_when_missing_or_invalid() {
+        assert_eq!(parse_positive_size(None, 1024), 1024);
+        assert_eq!(parse_positive_size(Some("invalid"), 1024), 1024);
+        assert_eq!(parse_positive_size(Some("0"), 1024), 1024);
+        assert_eq!(parse_positive_size(Some("2048"), 1024), 2048);
+    }
+
+    #[test]
+    fn telemetry_is_disabled_for_missing_or_invalid_configuration() {
+        assert!(!parse_bool(None, false));
+        assert!(!parse_bool(Some("invalid"), false));
+        assert!(parse_bool(Some("true"), false));
+        assert!(!parse_bool(Some("off"), true));
+    }
+
+    #[test]
+    fn startup_and_daily_telemetry_payload_fields_are_explicit() {
+        assert_eq!(
+            startup_telemetry_payload("hash", "1.2.3", true, "linux", "amd64"),
+            serde_json::json!({
+                "type": "startup",
+                "client_hash": "hash",
+                "version": "1.2.3",
+                "is_docker": true,
+                "os": "linux",
+                "arch": "amd64"
+            })
+        );
+        assert_eq!(
+            daily_telemetry_payload(
+                "hash",
+                "1.2.3",
+                10,
+                20,
+                2,
+                HashMap::from([("gpt-test".to_string(), 10)])
+            ),
+            serde_json::json!({
+                "type": "daily_mapd",
+                "client_hash": "hash",
+                "version": "1.2.3",
+                "total_requests": 10,
+                "total_tokens": 20,
+                "total_users": 2,
+                "model_distribution": {"gpt-test": 10}
+            })
+        );
+    }
 }

@@ -46,7 +46,7 @@
 						"key": "X-User-ID",
 						"value": "developer_1",
 						"type": "text",
-						"description": "Identity header used for budget tracking"
+						"description": "Trusted identity inserted by the authenticated founder backend; never accept this value directly from an untrusted client"
 					}
 				],
 				"body": {

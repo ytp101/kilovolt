@@ -30,7 +30,7 @@ export default function Home() {
       } else {
         setError(data.error || 'Failed to join waitlist. Please try again.');
       }
-    } catch (err) {
+    } catch {
       setError('An unexpected error occurred. Please try again.');
     } finally {
       setSubmitting(false);
@@ -137,9 +137,9 @@ export default function Home() {
           <div className="bg-slate-900/40 border border-slate-900 hover:border-slate-800 rounded-2xl p-8 shadow-xl backdrop-blur-sm transition duration-300 flex flex-col justify-between group">
             <div className="space-y-4">
               <div className="text-3xl">🛡️</div>
-              <h3 className="text-xl font-bold text-slate-200 group-hover:text-yellow-400 transition">Bankruptcy Shield</h3>
+              <h3 className="text-xl font-bold text-slate-200 group-hover:text-yellow-400 transition">Calculated Budget Circuit Breaker</h3>
               <p className="text-sm text-slate-400 leading-relaxed">
-                Charges prompt tokens upfront. Decodes and audits stream chunks on the fly and sever sockets immediately when spending bounds are breached.
+                Atomically reserves estimated prompt cost against project and user limits, then stops before forwarding an output increment that would exceed either limit.
               </p>
             </div>
           </div>
@@ -150,7 +150,7 @@ export default function Home() {
               <div className="text-3xl">♊</div>
               <h3 className="text-xl font-bold text-slate-200 group-hover:text-yellow-400 transition">Gemini SSE Translation</h3>
               <p className="text-sm text-slate-400 leading-relaxed">
-                Seamlessly routes requests to Google Gemini, translating camelCase stream outputs to OpenAI-compatible choices delta packets dynamically.
+                Experimental streaming-only translation for supported Gemini candidate text into OpenAI-shaped SSE chunks.
               </p>
             </div>
           </div>
@@ -159,22 +159,22 @@ export default function Home() {
           <div className="bg-slate-900/40 border border-slate-900 hover:border-slate-800 rounded-2xl p-8 shadow-xl backdrop-blur-sm transition duration-300 flex flex-col justify-between group">
             <div className="space-y-4">
               <div className="text-3xl">⚡</div>
-              <h3 className="text-xl font-bold text-slate-200 group-hover:text-yellow-400 transition">Zero-Copy Piping</h3>
+              <h3 className="text-xl font-bold text-slate-200 group-hover:text-yellow-400 transition">Bounded SSE Processing</h3>
               <p className="text-sm text-slate-400 leading-relaxed">
-                Pipes byte-streams asynchronously with O(1) space complexity, maintaining microsecond-level proxy overhead and minimal memory footprints.
+                Reconstructs UTF-8 SSE events across arbitrary network chunks and enforces an explicit maximum buffered frame size.
               </p>
             </div>
           </div>
         </section>
 
-        {/* Performance Comparison Table */}
+        {/* Verified Local Benchmark Table */}
         <section className="max-w-4xl mx-auto space-y-6">
           <div className="text-center space-y-2">
             <h2 className="text-2xl sm:text-3xl font-extrabold text-white">
-              Engineered in Rust for <span className="bg-gradient-to-r from-yellow-400 to-amber-500 bg-clip-text text-transparent">Extreme Resource Efficiency</span>
+              Measured locally with <span className="bg-gradient-to-r from-yellow-400 to-amber-500 bg-clip-text text-transparent">reproducible evidence</span>
             </h2>
             <p className="text-sm text-slate-400 max-w-xl mx-auto">
-              Compare Kilovolt’s footprint against standard Go and Python LLM reverse proxies under load.
+              Apple M4, macOS arm64, release build, deterministic loopback mock. These are one-machine observations, not universal guarantees.
             </p>
           </div>
           <div className="bg-slate-900/30 border border-slate-900 rounded-2xl overflow-hidden shadow-2xl backdrop-blur-sm">
@@ -183,46 +183,43 @@ export default function Home() {
                 <thead>
                   <tr className="border-b border-slate-900 bg-slate-950/40 text-slate-400 font-mono">
                     <th className="p-4 sm:p-5">Dimension</th>
-                    <th className="p-4 sm:p-5 text-yellow-400 font-bold">Rust (Kilovolt) ⚡</th>
-                    <th className="p-4 sm:p-5">Go Gateways</th>
-                    <th className="p-4 sm:p-5">Python Proxies</th>
+                    <th className="p-4 sm:p-5">Direct Local Mock</th>
+                    <th className="p-4 sm:p-5 text-yellow-400 font-bold">Through Kilovolt ⚡</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-900 text-slate-300 font-mono">
                   <tr>
-                    <td className="p-4 sm:p-5 text-slate-400 font-sans font-medium">Idle Memory (RAM)</td>
-                    <td className="p-4 sm:p-5 text-emerald-400 font-bold">~12 MB</td>
-                    <td className="p-4 sm:p-5">~60 MB</td>
-                    <td className="p-4 sm:p-5">~110 MB</td>
+                    <td className="p-4 sm:p-5 text-slate-400 font-sans font-medium">Idle RSS across 3 runs</td>
+                    <td className="p-4 sm:p-5">—</td>
+                    <td className="p-4 sm:p-5 text-emerald-400 font-bold">10,208–10,256 KiB</td>
                   </tr>
                   <tr>
-                    <td className="p-4 sm:p-5 text-slate-400 font-sans font-medium">Active Memory (Peak)</td>
-                    <td className="p-4 sm:p-5 text-emerald-400 font-bold">&lt;15 MB</td>
-                    <td className="p-4 sm:p-5">~90 MB</td>
-                    <td className="p-4 sm:p-5">~250 MB</td>
+                    <td className="p-4 sm:p-5 text-slate-400 font-sans font-medium">JSON total p50, concurrency 1</td>
+                    <td className="p-4 sm:p-5">0.107–0.115 ms</td>
+                    <td className="p-4 sm:p-5 text-emerald-400 font-bold">0.149–0.152 ms</td>
                   </tr>
                   <tr>
-                    <td className="p-4 sm:p-5 text-slate-400 font-sans font-medium">Proxy Latency Overhead</td>
-                    <td className="p-4 sm:p-5 text-emerald-400 font-bold">&lt;0.05 ms</td>
-                    <td className="p-4 sm:p-5">~0.50 ms</td>
-                    <td className="p-4 sm:p-5">~15.00 ms</td>
+                    <td className="p-4 sm:p-5 text-slate-400 font-sans font-medium">Streaming TTFB p50, concurrency 100</td>
+                    <td className="p-4 sm:p-5">2.977–3.186 ms</td>
+                    <td className="p-4 sm:p-5 text-emerald-400 font-bold">2.743–3.528 ms</td>
                   </tr>
                   <tr>
-                    <td className="p-4 sm:p-5 text-slate-400 font-sans font-medium">GC Jitter / Stalls</td>
-                    <td className="p-4 sm:p-5 text-emerald-400 font-bold">None (Ownership)</td>
-                    <td className="p-4 sm:p-5">Periodic GC Sweeps</td>
-                    <td className="p-4 sm:p-5">Stop-the-world GC</td>
+                    <td className="p-4 sm:p-5 text-slate-400 font-sans font-medium">5,000-event stream total p50</td>
+                    <td className="p-4 sm:p-5">2.484–2.663 ms</td>
+                    <td className="p-4 sm:p-5 text-emerald-400 font-bold">21.233–21.371 ms</td>
                   </tr>
                   <tr>
-                    <td className="p-4 sm:p-5 text-slate-400 font-sans font-medium">BPE Tokenization</td>
-                    <td className="p-4 sm:p-5 text-emerald-400 font-bold">Native tiktoken</td>
-                    <td className="p-4 sm:p-5">CGo Context Shifts</td>
-                    <td className="p-4 sm:p-5">CPU-Heavy Libraries</td>
+                    <td className="p-4 sm:p-5 text-slate-400 font-sans font-medium">Normal-workload RSS after warm-up</td>
+                    <td className="p-4 sm:p-5">—</td>
+                    <td className="p-4 sm:p-5 text-emerald-400 font-bold">about 61.5–64.5 MiB</td>
                   </tr>
                 </tbody>
               </table>
             </div>
           </div>
+          <p className="text-center text-xs text-slate-500">
+            Methodology, raw JSON, limitations, and the dirty source-state disclosure are in the repository benchmark documentation.
+          </p>
         </section>
 
         {/* Code Terminal Simulation */}
@@ -239,10 +236,10 @@ export default function Home() {
               <span className="text-yellow-500">curl</span> -i -N -X POST http://127.0.0.1:8080/v1/chat/completions \
             </p>
             <p className="pl-4">
-              -H <span className="text-emerald-400">"Authorization: Bearer sk-proj-your-key"</span> \
+              -H <span className="text-emerald-400">&quot;Authorization: Bearer sk-proj-your-key&quot;</span> \
             </p>
             <p className="pl-4">
-              -H <span className="text-emerald-400">"X-User-ID: developer_alice"</span> \
+              -H <span className="text-emerald-400">&quot;X-User-ID: developer_alice&quot;</span> \
             </p>
             <p className="pl-4">
               -d <span className="text-emerald-400">{`'{"model": "gemini-1.5-flash", "messages": [{"role": "user", "content": "Hi!"}], "stream": true}'`}</span>
