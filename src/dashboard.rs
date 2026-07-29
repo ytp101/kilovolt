@@ -41,10 +41,10 @@ fn get_memory_usage_kb() -> usize {
             for line in status.lines() {
                 if line.starts_with("VmRSS:") {
                     let parts: Vec<&str> = line.split_whitespace().collect();
-                    if parts.len() >= 2 {
-                        if let Ok(kb) = parts[1].parse::<usize>() {
-                            return kb;
-                        }
+                    if parts.len() >= 2
+                        && let Ok(kb) = parts[1].parse::<usize>()
+                    {
+                        return kb;
                     }
                 }
             }
