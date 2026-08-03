@@ -868,6 +868,8 @@ const SETUP_HTML: &str = r#"<!DOCTYPE html>
         .warning { border: 1px solid #b45309; background: #451a0355; color: #fde68a; }
         .error { border: 1px solid #b91c1c; background: #450a0a88; color: #fecaca; }
         label { display: block; margin: 18px 0 7px; font-size: 14px; font-weight: 700; }
+        .key-link { display: inline-block; margin: 0 0 9px; color: #7dd3fc; font-size: 13px; font-weight: 700; }
+        .key-link:hover { color: #bae6fd; }
         input { width: 100%; border: 1px solid #475569; border-radius: 9px; padding: 12px 13px; background: #020617; color: #f8fafc; font: inherit; }
         input:focus { outline: 2px solid #facc15; outline-offset: 2px; }
         .hint { display: block; color: #64748b; font-size: 12px; margin-top: 6px; }
@@ -884,6 +886,7 @@ const SETUP_HTML: &str = r#"<!DOCTYPE html>
         {{SETUP_ERROR}}
         <form action="/setup" method="post" autocomplete="off">
             <label for="provider-api-key">OpenAI API key</label>
+            <a class="key-link" href="https://platform.openai.com/api-keys" target="_blank" rel="noopener noreferrer">Create or manage an OpenAI API key ↗</a>
             <input id="provider-api-key" name="provider_api_key" type="password" placeholder="sk-..." required autofocus spellcheck="false" autocomplete="off">
             <span class="hint">Stored only in this process's memory, masked after setup, and sent only to the upstream provider.</span>
 
@@ -1023,7 +1026,10 @@ mod tests {
         let state = test_evaluation_state(0);
         let root = get_root(State(state.clone())).await;
         let root_body = root.into_body().collect().await.unwrap().to_bytes();
-        assert!(String::from_utf8_lossy(&root_body).contains("Finish setup"));
+        let root_html = String::from_utf8_lossy(&root_body);
+        assert!(root_html.contains("Finish setup"));
+        assert!(root_html.contains("https://platform.openai.com/api-keys"));
+        assert!(root_html.contains("target=\"_blank\" rel=\"noopener noreferrer\""));
 
         let empty_key = post_setup(
             State(state.clone()),
