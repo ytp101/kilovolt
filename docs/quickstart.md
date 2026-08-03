@@ -4,6 +4,10 @@ This path proves Kilovolt's current product boundary on one machine without a
 provider account or real API key. It uses the disabled-by-default embedded mock,
 fake local credentials, tiny in-memory budgets, and one container.
 
+This page is a provider-free evaluation, not the normal customer installation.
+For a real OpenAI-compatible provider, use the top-level `docker-compose.yml` and
+`.env.example` in the [README installation guide](../README.md#install-with-docker).
+
 ## Minute 0–5: start the demo
 
 Prerequisites: Docker with Compose and `curl`.
@@ -164,8 +168,9 @@ cargo run --release
 Startup is the configuration validation path. Invalid/non-finite/negative budgets,
 invalid strict booleans, an invalid pricing file, an invalid output default, an
 unsafe public bind, or a malformed/non-HTTP(S) upstream URL stop the process with
-a named configuration error. There is no separate TOML/YAML config loader or
-`check --config` command in this phase.
+a named configuration error. An invalid telemetry URL also stops startup when
+telemetry is enabled, but is ignored while telemetry remains off. There is no
+separate TOML/YAML config loader or `check --config` command in this phase.
 
 ## Stop and roll back
 

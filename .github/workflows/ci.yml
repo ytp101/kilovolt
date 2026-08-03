@@ -21,8 +21,6 @@ jobs:
       - run: cargo clippy --all-targets --all-features -- -D warnings
       - run: cargo test --all-targets --all-features
       - run: cargo build --release
-      - name: Validate demo Compose configuration
-        run: docker compose -f docker-compose.demo.yml config --quiet
       - name: Verify the demo smoke test fails when Kilovolt is unavailable
         run: |
           cleanup_probe="$(mktemp -d)"
@@ -42,7 +40,7 @@ jobs:
             echo "demo smoke left temporary state after failure" >&2
             exit 1
           fi
-      - name: Verify invalid financial configuration fails cleanly
+      - name: Verify invalid startup configuration fails cleanly
         run: |
           if invalid_output="$(KILOVOLT_PROJECT_BUDGET=not-a-budget \
             target/release/kilovolt 2>&1)"; then
@@ -51,36 +49,95 @@ jobs:
             exit 1
           fi
           grep -Fq 'KILOVOLT_PROJECT_BUDGET' <<<"${invalid_output}"
-      - name: Run the 15-minute demo smoke test
+
+          if invalid_output="$(KILOVOLT_TELEMETRY_ENABLED=true \
+            KILOVOLT_TELEMETRY_URL=not-an-http-url \
+            target/release/kilovolt 2>&1)"; then
+            printf '%s\n' "${invalid_output}" >&2
+            echo "Kilovolt unexpectedly started with an invalid active telemetry URL" >&2
+            exit 1
+          fi
+          grep -Fq 'KILOVOLT_TELEMETRY_URL' <<<"${invalid_output}"
+      - name: Run normal self-hosted Compose journey
         run: |
-          demo_dir="$(mktemp -d)"
-          server_pid=""
           cleanup() {
-            if [[ -n "${server_pid}" ]]; then
-              kill "${server_pid}" 2>/dev/null || true
-              wait "${server_pid}" 2>/dev/null || true
-            fi
-            rm -rf -- "${demo_dir}"
+            docker compose down --remove-orphans >/dev/null 2>&1 || true
+            rm -f .env
           }
           trap cleanup EXIT
 
-          env \
-            BIND_ADDR=127.0.0.1 \
-            KILOVOLT_PORT=18080 \
-            KILOVOLT_PROJECT_BUDGET=0.000100 \
-            KILOVOLT_DEFAULT_BUDGET=0.000010 \
-            KILOVOLT_PROXY_TOKEN=demo-proxy-token \
-            KILOVOLT_DASHBOARD_TOKEN=demo-dashboard-token \
-            KILOVOLT_ENABLE_MOCK_UPSTREAM=true \
-            KILOVOLT_NON_STREAM_DEFAULT_MAX_OUTPUT_TOKENS=16 \
-            KILOVOLT_TELEMETRY_ENABLED=false \
-            target/release/kilovolt >"${demo_dir}/kilovolt.log" 2>&1 &
-          server_pid="$!"
-
-          if ! scripts/demo-smoke.sh; then
-            cat "${demo_dir}/kilovolt.log" >&2
+          if missing_env_output="$(docker compose config --quiet 2>&1)"; then
+            echo "normal Compose unexpectedly validated without .env" >&2
             exit 1
           fi
+          grep -Fq '.env' <<<"${missing_env_output}"
+
+          cp .env.example .env
+          sed -i 's/^KILOVOLT_HOST_PORT=.*/KILOVOLT_HOST_PORT=18081/' .env
+          docker compose config --quiet
+          docker compose up -d
+
+          empty_proxy_rejected=false
+          for _ in $(seq 1 10); do
+            if docker compose logs --no-color kilovolt 2>&1 |
+              grep -Fq 'Non-loopback startup requires KILOVOLT_PROXY_TOKEN'; then
+              empty_proxy_rejected=true
+              break
+            fi
+            sleep 1
+          done
+          if curl --silent --fail http://127.0.0.1:18081/health >/dev/null 2>&1; then
+            echo "container became healthy with an empty proxy token" >&2
+            exit 1
+          fi
+          test "${empty_proxy_rejected}" = true
+          docker compose down --remove-orphans
+
+          sed -i 's/^KILOVOLT_PROXY_TOKEN=.*/KILOVOLT_PROXY_TOKEN=ci-proxy-token/' .env
+          sed -i 's/^KILOVOLT_DASHBOARD_TOKEN=.*/KILOVOLT_DASHBOARD_TOKEN=ci-dashboard-token/' .env
+          docker compose config --quiet
+          docker compose up -d
+
+          health_status=""
+          for _ in $(seq 1 60); do
+            health_status="$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{end}}' kilovolt 2>/dev/null || true)"
+            if [[ "${health_status}" == "healthy" ]]; then
+              break
+            fi
+            if [[ "$(docker inspect --format '{{.State.Status}}' kilovolt 2>/dev/null || true)" == "exited" ]]; then
+              break
+            fi
+            sleep 1
+          done
+
+          if [[ "${health_status}" != "healthy" ]]; then
+            docker compose ps --all >&2 || true
+            docker compose logs --no-color kilovolt >&2 || true
+            echo "normal Compose health timeout" >&2
+            exit 1
+          fi
+          test "$(curl --fail --silent http://127.0.0.1:18081/health)" = "OK"
+          docker compose ps
+          docker compose down --remove-orphans
+          rm -f .env
+          trap - EXIT
+      - name: Run provider-free demo Compose journey
+        run: |
+          cleanup() {
+            docker compose -f docker-compose.demo.yml down --remove-orphans >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+
+          docker compose -f docker-compose.demo.yml config --quiet
+          docker compose -f docker-compose.demo.yml up -d --build
+
+          if ! ./scripts/demo-smoke.sh; then
+            docker compose -f docker-compose.demo.yml ps --all >&2 || true
+            docker compose -f docker-compose.demo.yml logs --no-color >&2 || true
+            exit 1
+          fi
+          docker compose -f docker-compose.demo.yml down --remove-orphans
+          trap - EXIT
       - run: python3 scripts/check-docs.py
       - run: scripts/smoke-cookbook.sh
       - run: python3 scripts/telemetry-smoke.py

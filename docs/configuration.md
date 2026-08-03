@@ -3,8 +3,11 @@
 All configuration is read from the environment at startup. Every change in this
 table therefore requires a process restart. Startup fails with a named
 configuration error for invalid financial limits, strict security booleans,
-pricing files, non-stream output defaults, deployment exposure, or provider URLs.
-There is no separate configuration-file schema or validation CLI in this phase.
+pricing files, non-stream output defaults, deployment exposure, or active
+provider/telemetry URLs. A malformed telemetry URL is ignored while telemetry is
+disabled because it cannot receive data. There is no separate configuration-file
+schema or validation CLI in this phase. The normal Docker path starts from the
+short [`.env.example`](../.env.example); this table covers advanced settings.
 
 | Variable | Type | Default / required | Security and behavior | Example |
 |---|---|---|---|---|
@@ -26,7 +29,7 @@ There is no separate configuration-file schema or validation CLI in this phase.
 | `KILOVOLT_ENABLE_MOCK_UPSTREAM` | strict boolean | `false` | Enables the embedded test/benchmark route and `X-Mock-Upstream`. Never enable as a production feature. | `true` for local tests only |
 | `KILOVOLT_DASHBOARD_TOKEN` | non-empty secret string | none; dashboard disabled | Enables `/dashboard` and `/api/stats`. Use high entropy, TLS, and private exposure. | output of `openssl rand -hex 32` |
 | `KILOVOLT_TELEMETRY_ENABLED` | boolean (`true/false`, `1/0`, `yes/no`, `on/off`) | `false` | Explicitly opts into company telemetry. Invalid values use `false`. | `false` |
-| `KILOVOLT_TELEMETRY_URL` | absolute HTTP(S) URL | `https://kilovolt.vercel.app/v1/update-check` | Used only when telemetry is enabled. Receives the fields in [telemetry.md](telemetry.md). | `http://127.0.0.1:9000/telemetry` |
+| `KILOVOLT_TELEMETRY_URL` | absolute HTTP(S) URL | `https://kilovolt.vercel.app/v1/update-check` | Used only when telemetry is enabled. A malformed/non-HTTP(S) value fails startup when enabled and is ignored when disabled. Receives the fields in [telemetry.md](telemetry.md). | `http://127.0.0.1:9000/telemetry` |
 | `KILOVOLT_PER_STEP_TOKENS` | positive integer tokens | none | Rejects a prompt whose locally estimated prompt tokens exceed the value. | `2048` |
 | `KILOVOLT_PER_PIPELINE_TOKENS` | positive integer tokens | none | Requires `X-Pipeline-ID` to group usage. The check/update is not a financial reservation and is weaker under concurrency. | `10000` |
 | `KILOVOLT_PER_DAY_TOKENS` | positive integer tokens | none | Process-local counter reset at server-local midnight. The check/update is not atomic with request execution. | `100000` |

@@ -14,6 +14,8 @@
       restart reset and single-process constraints. Do not use the unsafe
       unauthenticated override unless another reviewed control requires it.
 - [ ] Generate `KILOVOLT_DASHBOARD_TOKEN` with at least 32 random bytes.
+- [ ] Keep `.env` uncommitted and out of the Docker build context; start from the
+      reviewed `.env.example` and keep proxy/dashboard values distinct.
 - [ ] Set a project budget and a per-user default budget.
 - [ ] Validate built-in prices or supply a validated `KILOVOLT_PRICING_FILE`.
       Confirm unknown models fail before upstream.
@@ -47,6 +49,12 @@ cargo fmt --check
 cargo clippy --all-targets --all-features -- -D warnings
 cargo test --all-targets --all-features
 cargo build --release
+cp .env.example .env
+# Replace both blank secrets in .env before continuing.
+docker compose config --quiet
+docker compose up -d
+curl --fail http://127.0.0.1:8080/health
+docker compose down --remove-orphans
 docker compose -f docker-compose.demo.yml config --quiet
 docker compose -f docker-compose.demo.yml up -d --build
 scripts/demo-smoke.sh
@@ -62,9 +70,9 @@ docker build -t kilovolt:local .
 After starting a container, check:
 
 ```bash
-docker inspect --format '{{.State.Health.Status}}' kilovolt-test
+docker inspect --format '{{.State.Health.Status}}' kilovolt
 curl --fail http://127.0.0.1:8080/health
-curl --user "kilovolt:${KILOVOLT_DASHBOARD_TOKEN}" \
+curl --user 'kilovolt:<dashboard-token-from-.env>' \
   http://127.0.0.1:8080/api/stats
 ```
 

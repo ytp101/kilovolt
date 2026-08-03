@@ -1,14 +1,198 @@
 # Kilovolt
 
 Kilovolt is a self-hosted Rust gateway placed between an application's trusted
-backend and an upstream chat-completions provider. It enforces a process-local
-calculated-spend limit for the whole application project and a default limit for
-each trusted `X-User-ID`.
+backend and an OpenAI-compatible chat-completions provider. It enforces
+process-local calculated-spend limits for the application project and each
+trusted `X-User-ID`, including supported streaming output. It complements
+provider-side controls; its estimates are not exact provider invoices.
 
-Kilovolt addresses a narrow problem: stop forwarding a request when the next
-calculated prompt or supported output increment would exceed either configured
-budget. It complements provider-side limits and alerts; it is not an exact
-provider invoice or a guarantee against every unexpected bill.
+## Install with Docker
+
+Prerequisites: Docker with Compose and `openssl` for generating secrets.
+
+```bash
+git clone https://github.com/ytp101/kilovolt.git
+cd kilovolt
+cp .env.example .env
+```
+
+Generate two different secrets and place them in `.env` as
+`KILOVOLT_PROXY_TOKEN` and `KILOVOLT_DASHBOARD_TOKEN`:
+
+```bash
+openssl rand -hex 32
+openssl rand -hex 32
+```
+
+Review `KILOVOLT_PROJECT_BUDGET`, `KILOVOLT_DEFAULT_BUDGET`, and the built-in
+model prices before sending real traffic. Then start the single Kilovolt service:
+
+```bash
+docker compose up -d
+docker compose ps
+curl --fail http://127.0.0.1:8080/health
+```
+
+Expected response:
+
+```text
+OK
+```
+
+The normal Compose path uses the pinned multi-architecture image configured by
+`KILOVOLT_IMAGE`, loads customer settings from `.env`, publishes only to host
+loopback, and inherits the image's health check. The container listens on all of
+its private interfaces, so Compose supplies the required acknowledgement that
+the ledger is process-local; this does not make replicas safe.
+
+Useful lifecycle commands:
+
+```bash
+docker compose logs -f kilovolt
+docker compose down
+```
+
+## Connect an application
+
+Only a trusted, authenticated application backend should call Kilovolt:
+
+```text
+Trusted application backend
+  -> Authorization: Bearer <provider API key>
+  -> X-Kilovolt-Key: <Kilovolt proxy secret>
+  -> X-User-ID: <authenticated application user>
+  -> Kilovolt
+  -> AI provider
+```
+
+Change the SDK base URL to `http://127.0.0.1:8080/v1` and add the two Kilovolt
+headers. The provider credential remains in the application and continues to be
+sent in the request's normal `Authorization` header; it is received and forwarded
+by Kilovolt, not copied into Kilovolt's `.env`.
+
+`X-User-ID` is a trusted accounting identity, not authentication. The backend
+must strip any client-provided value and insert the ID derived from its
+authenticated session. Never let an untrusted browser or mobile client choose
+this value or call Kilovolt directly.
+
+### curl
+
+```bash
+export OPENAI_API_KEY='provider-secret'
+export KILOVOLT_PROXY_TOKEN='same-value-as-KILOVOLT_PROXY_TOKEN-in-.env'
+
+curl --fail --show-error \
+  -H "Authorization: Bearer ${OPENAI_API_KEY}" \
+  -H "X-Kilovolt-Key: ${KILOVOLT_PROXY_TOKEN}" \
+  -H 'X-User-ID: authenticated-user-123' \
+  -H 'Content-Type: application/json' \
+  --data '{"model":"gpt-4o-mini","messages":[{"role":"user","content":"Reply with OK"}],"max_completion_tokens":16}' \
+  http://127.0.0.1:8080/v1/chat/completions
+```
+
+### Python OpenAI SDK
+
+```python
+import os
+from openai import OpenAI
+
+client = OpenAI(
+    api_key=os.environ["OPENAI_API_KEY"],
+    base_url="http://127.0.0.1:8080/v1",
+)
+response = client.chat.completions.create(
+    model="gpt-4o-mini",
+    messages=[{"role": "user", "content": "Reply with OK"}],
+    max_completion_tokens=16,
+    extra_headers={
+        "X-Kilovolt-Key": os.environ["KILOVOLT_PROXY_TOKEN"],
+        "X-User-ID": "authenticated-user-123",
+    },
+)
+print(response.choices[0].message.content)
+```
+
+### TypeScript OpenAI SDK
+
+```typescript
+import OpenAI from "openai";
+
+const client = new OpenAI({
+  apiKey: process.env.OPENAI_API_KEY,
+  baseURL: "http://127.0.0.1:8080/v1",
+});
+const response = await client.chat.completions.create(
+  {
+    model: "gpt-4o-mini",
+    messages: [{ role: "user", content: "Reply with OK" }],
+    max_completion_tokens: 16,
+  },
+  {
+    headers: {
+      "X-Kilovolt-Key": process.env.KILOVOLT_PROXY_TOKEN!,
+      "X-User-ID": "authenticated-user-123",
+    },
+  },
+);
+console.log(response.choices[0].message.content);
+```
+
+For non-streaming requests, send a positive `max_completion_tokens` (preferred)
+or `max_tokens`, or deliberately size
+`KILOVOLT_NON_STREAM_DEFAULT_MAX_OUTPUT_TOKENS`.
+
+## Verify and roll back
+
+Health is public; spend and operational state require the distinct dashboard
+credential:
+
+```bash
+curl --fail http://127.0.0.1:8080/health
+curl --user 'kilovolt:<dashboard-token-from-.env>' \
+  http://127.0.0.1:8080/api/stats
+```
+
+To remove Kilovolt, first restore the application's original provider base URL
+and remove `X-Kilovolt-Key` and `X-User-ID`. Keep using the application's original
+provider API-key setting, confirm a request reaches the original upstream, then
+stop Kilovolt:
+
+```bash
+docker compose down
+```
+
+## Provider-free demo
+
+The separate evaluation path uses fake credentials, the explicitly enabled
+embedded mock, and tiny budgets. It needs no provider account and makes no paid
+provider request:
+
+```bash
+docker compose -f docker-compose.demo.yml up -d --build
+./scripts/demo-smoke.sh
+docker compose -f docker-compose.demo.yml down --remove-orphans
+```
+
+See the [15-minute provider-free evaluation](docs/quickstart.md) for the expected
+success, rejection, streaming cutoff, and dashboard evidence. This demo is not
+the normal real-provider installation above.
+
+## Current limitations
+
+- All accounting is in memory, resets on restart, and is independent per process.
+- One logical project budget must use exactly one Kilovolt process; there is no
+  multi-replica coordination.
+- Money uses `f64`.
+- Locally calculated spend is not exact provider invoice equivalence or a
+  guarantee against every unexpected bill.
+- Built-in prices may be stale and must be reviewed or overridden before real
+  traffic.
+- Streaming text is accounted per supported SSE event, a bounded conservative
+  approximation rather than whole-answer/provider billing equivalence.
+- `X-User-ID` is trusted accounting identity, not end-user authentication; a
+  missing value uses the shared `anonymous` ledger.
+- Kilovolt has no persistence, end-user authentication, rate limiting, or
+  distributed consistency.
 
 ## Current maturity
 
@@ -35,20 +219,6 @@ Experimental:
 - optional pipeline/day token gates, whose check/update lifecycle is weaker
   under concurrency than the financial ledger.
 
-Known limitations:
-
-- all ledgers are in memory, reset on restart, and are independent per process;
-- money uses `f64`;
-- built-in prices were not independently verified in this offline Phase 3 run
-  and may be stale;
-- streaming text is tokenized per SSE event, so it is a bounded conservative
-  approximation rather than whole-answer/provider billing equivalence;
-- locally estimated tokens and configured prices are not exact provider invoice
-  equivalence;
-- no end-user authentication, rate limiting, persistence, or distributed
-  consistency is implemented; optional proxy authentication protects the route,
-  while `X-User-ID` still relies on the founder backend.
-
 ## Supported routes
 
 | Route | Behavior |
@@ -61,71 +231,6 @@ Known limitations:
 
 Gemini models are translated only when `stream=true`. Other provider families
 and API routes are not claimed.
-
-## 15-minute local evaluation
-
-Start a complete localhost demo with no provider account or real API key:
-
-```bash
-docker compose -f docker-compose.demo.yml up -d --build
-./scripts/demo-smoke.sh
-```
-
-The smoke test proves a successful request, preflight budget rejection, streaming
-cutoff, authentication failures, fail-closed pricing, stats, and the dashboard.
-Follow the [15-minute design-partner evaluation](docs/quickstart.md) for the exact
-journey, minimal curl/Python/TypeScript integration changes, caveats, presets, and
-rollback.
-
-## Production-style startup
-
-```bash
-cargo build --release
-
-export BIND_ADDR=127.0.0.1
-export KILOVOLT_PORT=8080
-export KILOVOLT_PROJECT_BUDGET=25.00
-export KILOVOLT_DEFAULT_BUDGET=5.00
-export KILOVOLT_DASHBOARD_TOKEN="$(openssl rand -hex 32)"
-export KILOVOLT_PROXY_TOKEN="$(openssl rand -hex 32)"
-export KILOVOLT_TELEMETRY_ENABLED=false
-
-./target/release/kilovolt
-```
-
-Test through the deterministic mock without a real provider key:
-
-```bash
-# In the server terminal, restart with mock mode for local verification only:
-KILOVOLT_ENABLE_MOCK_UPSTREAM=true ./target/release/kilovolt
-
-# In another terminal:
-curl --no-buffer --fail \
-  -H 'Authorization: Bearer mock-key' \
-  -H 'Content-Type: application/json' \
-  -H 'X-User-ID: local-test-user' \
-  -H "X-Kilovolt-Key: ${KILOVOLT_PROXY_TOKEN}" \
-  -H 'X-Mock-Upstream: true' \
-  --data '{
-    "model":"gpt-4o-mini",
-    "messages":[{"role":"user","content":"Hello"}],
-    "stream":true
-  }' \
-  http://127.0.0.1:8080/v1/chat/completions
-```
-
-## Safe deployment boundary
-
-```mermaid
-flowchart LR
-    C["Untrusted browser/mobile client"] -->|"authenticated request"| B["Founder's backend"]
-    B -->|"provider credential + X-Kilovolt-Key + trusted X-User-ID"| K["Private Kilovolt"]
-    K --> P["AI provider"]
-```
-
-`X-User-ID` must be inserted by the authenticated founder backend. Never let an
-untrusted browser or mobile client choose it directly; rotating the value would
-bypass per-user accounting.
 
 ## Project and per-user budgets
 
@@ -140,43 +245,26 @@ Every prompt reservation and output charge checks both levels under one ledger
 lock. A failed check leaves both unchanged. If the project variable is omitted,
 it falls back to `KILOVOLT_DEFAULT_BUDGET`.
 
-For `stream:false`, send a positive `max_completion_tokens` (preferred) or
-`max_tokens`, or configure `KILOVOLT_NON_STREAM_DEFAULT_MAX_OUTPUT_TOKENS`.
-Kilovolt reserves prompt plus maximum output cost before upstream contact,
-settles exact/provider-reported or supported locally estimated output afterward,
-and commits the full output reservation if cost becomes unknowable after
-provider acceptance. See [Safe non-streaming requests](docs/cookbook/safe-non-streaming.md).
-
-The default bind is loopback. Non-loopback startup requires
-`KILOVOLT_ACKNOWLEDGE_PROCESS_LOCAL_LEDGER=true` and a proxy token (or an
-explicit unsafe unauthenticated override). The acknowledgement does not make
-horizontal replicas safe: all spend is process-local and resets on restart.
+Kilovolt reserves prompt plus maximum output cost for non-streaming requests
+before upstream contact, settles exact/provider-reported or supported locally
+estimated output afterward, and commits the full output reservation if cost
+becomes unknowable after provider acceptance. See
+[Safe non-streaming requests](docs/cookbook/safe-non-streaming.md).
 
 ## Dashboard
 
 Open `http://127.0.0.1:8080/dashboard`. For the browser's HTTP Basic prompt, use
-username `kilovolt` and `KILOVOLT_DASHBOARD_TOKEN` as the password.
-
-```bash
-curl --user "kilovolt:${KILOVOLT_DASHBOARD_TOKEN}" \
-  http://127.0.0.1:8080/api/stats
-```
-
-Without the token configuration, both routes return `503`. Use TLS and private
-network exposure outside localhost.
+username `kilovolt` and `KILOVOLT_DASHBOARD_TOKEN` as the password. Without the
+token configuration, the dashboard and stats routes return `503`. Use TLS and
+private network exposure outside localhost.
 
 ## Telemetry
 
-Company telemetry is disabled by default:
-
-```bash
-export KILOVOLT_TELEMETRY_ENABLED=false
-```
-
-Explicit opt-in sends the documented startup, 24-hour process aggregates, and
-per-recorded-request calculated-cost payloads to `KILOVOLT_TELEMETRY_URL`.
-Customer dashboard data remains local and uses a separate data path. See
-[telemetry.md](docs/telemetry.md) for exact fields and privacy implications.
+Company telemetry is disabled by default. Explicit opt-in sends the documented
+startup, 24-hour process aggregates, and per-recorded-request calculated-cost
+payloads to `KILOVOLT_TELEMETRY_URL`. Customer dashboard data remains local and
+uses a separate data path. See [telemetry.md](docs/telemetry.md) for exact fields
+and privacy implications.
 
 ## Verified benchmark snapshot
 
@@ -195,7 +283,8 @@ was performed.
 
 ## Documentation
 
-- [15-minute design-partner evaluation](docs/quickstart.md)
+- [Normal Docker deployment](docs/cookbook/docker-deployment.md)
+- [15-minute provider-free evaluation](docs/quickstart.md)
 - [Architecture and lifecycle](docs/architecture.md)
 - [Security and threat model](docs/security.md)
 - [Configuration reference](docs/configuration.md)

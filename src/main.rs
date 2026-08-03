@@ -294,6 +294,14 @@ fn validate_http_url(raw: &str, variable: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn validate_http_url_when_enabled(enabled: bool, raw: &str, variable: &str) -> Result<(), String> {
+    if enabled {
+        validate_http_url(raw, variable)
+    } else {
+        Ok(())
+    }
+}
+
 fn parse_strict_bool(raw: Option<&str>, variable: &str) -> Result<bool, String> {
     match raw.map(str::trim).map(str::to_ascii_lowercase).as_deref() {
         None | Some("0" | "false" | "no" | "off") => Ok(false),
@@ -543,10 +551,17 @@ async fn main() {
         std::env::var("KILOVOLT_TELEMETRY_ENABLED").ok().as_deref(),
         false,
     );
+    let telemetry_endpoint = std::env::var("KILOVOLT_TELEMETRY_URL")
+        .unwrap_or_else(|_| DEFAULT_TELEMETRY_URL.to_string());
+    validate_http_url_when_enabled(
+        telemetry_enabled,
+        &telemetry_endpoint,
+        "KILOVOLT_TELEMETRY_URL",
+    )
+    .unwrap_or_else(|message| fatal_configuration(&message));
     let telemetry = TelemetryConfig {
         enabled: telemetry_enabled,
-        endpoint: std::env::var("KILOVOLT_TELEMETRY_URL")
-            .unwrap_or_else(|_| DEFAULT_TELEMETRY_URL.to_string()),
+        endpoint: telemetry_endpoint,
     };
     let openai_upstream_url = std::env::var("KILOVOLT_OPENAI_UPSTREAM_URL")
         .unwrap_or_else(|_| "https://api.openai.com/v1/chat/completions".to_string());
@@ -683,6 +698,7 @@ mod tests {
         bind_address, daily_telemetry_payload, is_loopback_bind, parse_bool, parse_budget_limit,
         parse_optional_positive_size, parse_positive_size, parse_strict_bool,
         startup_telemetry_payload, validate_deployment_safety, validate_http_url,
+        validate_http_url_when_enabled,
     };
     use std::collections::HashMap;
 
@@ -749,6 +765,15 @@ mod tests {
         ] {
             assert!(validate_http_url(invalid, "TEST").is_err(), "{invalid}");
         }
+    }
+
+    #[test]
+    fn telemetry_url_is_validated_only_when_telemetry_is_enabled() {
+        assert!(validate_http_url_when_enabled(false, "unused-invalid-url", "TEST").is_ok());
+        assert!(validate_http_url_when_enabled(true, "unused-invalid-url", "TEST").is_err());
+        assert!(
+            validate_http_url_when_enabled(true, "https://example.com/telemetry", "TEST").is_ok()
+        );
     }
 
     #[test]
