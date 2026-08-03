@@ -17,6 +17,7 @@ const APP_CSS: &str = include_str!("ui/app.css");
 const SETUP_HTML: &str = include_str!("ui/setup.html");
 const ONBOARDING_HTML: &str = include_str!("ui/onboarding.html");
 const DASHBOARD_HTML: &str = include_str!("ui/dashboard.html");
+const DOCUMENTATION_HTML: &str = include_str!("ui/documentation.html");
 const EVALUATION_USER_ID: &str = "kilovolt-evaluation";
 
 #[derive(serde::Deserialize)]
@@ -401,6 +402,17 @@ fn render_dashboard(state: &AppState) -> String {
         .replace("{{MONITOR_PROGRESS}}", monitor_progress)
 }
 
+fn render_documentation(state: &AppState) -> String {
+    let (brand_href, getting_started_nav) = if state.evaluation_mode() {
+        ("/", "<a href=\"/\">Getting started</a>")
+    } else {
+        ("/dashboard", "")
+    };
+    render_template(DOCUMENTATION_HTML)
+        .replace("{{BRAND_HREF}}", brand_href)
+        .replace("{{GETTING_STARTED_NAV}}", getting_started_nav)
+}
+
 fn evaluation_payload(
     state: &AppState,
     ok: bool,
@@ -628,11 +640,22 @@ pub async fn get_dashboard(State(state): State<AppState>, headers: HeaderMap) ->
     with_no_store(Html(render_dashboard(&state)).into_response())
 }
 
+/// Route handler for the local integration quick reference.
+pub async fn get_documentation(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    if !state.evaluation_mode()
+        && let Some(response) = dashboard_auth_failure(&state, &headers)
+    {
+        return response;
+    }
+
+    with_no_store(Html(render_documentation(&state)).into_response())
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        SetupForm, generate_gateway_key, get_dashboard, get_root, get_stats, post_evaluation_test,
-        post_setup,
+        SetupForm, generate_gateway_key, get_dashboard, get_documentation, get_root, get_stats,
+        post_evaluation_test, post_setup,
     };
     use axum::extract::{Form, State};
     use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
@@ -749,6 +772,48 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn local_documentation_contains_verified_examples_without_setup_secrets() {
+        let state = test_evaluation_state(0);
+        let response = get_documentation(State(state), HeaderMap::new()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response
+                .headers()
+                .get(header::CACHE_CONTROL)
+                .and_then(|value| value.to_str().ok()),
+            Some("no-store")
+        );
+
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let html = String::from_utf8_lossy(&body);
+        assert!(html.contains("Use Kilovolt from your backend"));
+        assert!(html.contains("Python"));
+        assert!(html.contains("JavaScript"));
+        assert!(html.contains("curl http://127.0.0.1:8080/v1/chat/completions"));
+        assert!(html.contains("KILOVOLT_API_KEY"));
+        assert!(html.contains("X-User-ID"));
+        assert!(html.contains("Full GitHub documentation"));
+        assert!(!html.contains("kvlt_test_gateway"));
+    }
+
+    #[tokio::test]
+    async fn manual_mode_documentation_uses_dashboard_authentication() {
+        let state = test_state(0, 1.0);
+        assert_eq!(
+            get_documentation(State(state.clone()), HeaderMap::new())
+                .await
+                .status(),
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            get_documentation(State(state), bearer_headers("test-dashboard-token"))
+                .await
+                .status(),
+            StatusCode::OK
+        );
+    }
+
+    #[tokio::test]
     async fn evaluation_setup_validates_input_masks_provider_and_closes_after_success() {
         let state = test_evaluation_state(0);
         let root = get_root(State(state.clone())).await;
@@ -825,6 +890,7 @@ mod tests {
         assert!(configured_html.contains("••••ABCD"));
         assert!(configured_html.contains("Setup complete"));
         assert!(configured_html.contains("Send test request"));
+        assert!(configured_html.contains("href=\"/documentation\""));
 
         let setup = state.evaluation_setup_snapshot().unwrap();
         assert!(setup.gateway_key().starts_with("kvlt_"));

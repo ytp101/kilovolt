@@ -325,6 +325,25 @@ td.numeric, th.numeric { text-align: right; }
 .health-item strong { display: block; margin-top: 5px; font-size: 17px; }
 .limitations { margin-top: 22px; color: var(--faint); font-size: 12px; }
 
+.docs-shell { width: min(100% - 32px, 900px); margin-inline: auto; }
+.docs-heading { margin-bottom: 26px; }
+.docs-section { padding: 26px; }
+.docs-section + .docs-section { margin-top: 20px; }
+.docs-steps { display: grid; gap: 12px; margin: 20px 0; padding: 0; counter-reset: docs-step; list-style: none; }
+.docs-steps li { display: grid; grid-template-columns: 32px 1fr; gap: 2px 12px; align-items: center; }
+.docs-steps li::before { grid-row: 1 / 3; width: 28px; height: 28px; display: grid; place-items: center; border: 1px solid var(--border-strong); border-radius: 99px; background: var(--surface-soft); color: var(--accent); font-size: 12px; font-weight: 850; counter-increment: docs-step; content: counter(docs-step); }
+.docs-steps strong { color: var(--text); font-size: 14px; }
+.docs-steps span, .docs-steps code { color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
+.docs-example-heading { align-items: flex-start; }
+.docs-outcomes { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin-top: 18px; }
+.docs-outcomes div { border: 1px solid var(--border); border-radius: 10px; padding: 14px; background: var(--surface-soft); }
+.docs-outcomes strong, .docs-outcomes span { display: block; }
+.docs-outcomes strong { margin-bottom: 5px; color: var(--text); font-size: 14px; }
+.docs-outcomes span { color: var(--muted); font-size: 12px; }
+.github-addon { display: flex; align-items: center; justify-content: space-between; gap: 24px; margin-top: 24px; padding: 20px 4px; }
+.github-addon h2 { font-size: 18px; }
+.github-addon p { max-width: 610px; margin-bottom: 0; font-size: 13px; }
+
 @media (max-width: 760px) {
   .shell, .onboarding, .setup-shell { width: min(100% - 24px, 100%); }
   .page-center { padding-block: 12px; place-items: start center; }
@@ -336,6 +355,10 @@ td.numeric, th.numeric { text-align: right; }
   .result-grid, .metric-grid { grid-template-columns: repeat(2, 1fr); }
   .dashboard-heading { align-items: flex-start; flex-direction: column; }
   .health-grid { grid-template-columns: 1fr; }
+  .docs-shell { width: min(100% - 24px, 100%); }
+  .docs-section { padding: 22px 18px; }
+  .docs-outcomes { grid-template-columns: 1fr; }
+  .github-addon { align-items: flex-start; flex-direction: column; padding-inline: 0; }
 }
 
 @media (max-width: 460px) {
@@ -346,4 +369,7 @@ td.numeric, th.numeric { text-align: right; }
   .secret-actions { width: 100%; }
   .secret-actions button { flex: 1; }
   .toast { right: 12px; bottom: 12px; left: 12px; text-align: center; }
+  .docs-example-heading { align-items: stretch; flex-direction: column; }
+  .docs-example-heading .icon-button { width: 100%; }
+  .github-addon .button { width: 100%; }
 }

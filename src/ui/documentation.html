@@ -1,0 +1,161 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <link rel="icon" href="data:,">
+  <title>Documentation · Kilovolt</title>
+  <style>{{APP_CSS}}</style>
+</head>
+<body>
+  <header class="app-header">
+    <nav class="shell nav" aria-label="Primary navigation">
+      <a class="brand" href="{{BRAND_HREF}}">⚡ Kilovolt</a>
+      <div class="nav-links">
+        {{GETTING_STARTED_NAV}}
+        <a href="/dashboard">Dashboard</a>
+        <a class="active" href="/documentation" aria-current="page">Documentation</a>
+      </div>
+    </nav>
+  </header>
+
+  <main class="docs-shell main-content">
+    <header class="docs-heading">
+      <p class="small" style="color: var(--accent); font-weight: 800; margin-bottom: 8px;">Local quick reference</p>
+      <h1>Use Kilovolt from your backend</h1>
+      <p class="lead">Choose your language and send an OpenAI-compatible request through the local Kilovolt gateway.</p>
+    </header>
+
+    <section class="card docs-section" aria-labelledby="before-heading">
+      <h2 id="before-heading">Before you start</h2>
+      <ol class="docs-steps">
+        <li><strong>Copy your gateway key</strong><span>Get it from the Connect stage under Getting started.</span></li>
+        <li><strong>Set one environment variable</strong><code>export KILOVOLT_API_KEY="your-kilovolt-gateway-key"</code></li>
+        <li><strong>Use your trusted user identity</strong><span>Derive the user ID only after your backend authenticates the user.</span></li>
+      </ol>
+      <div class="notice"><strong>Local base URL:</strong> <code>http://127.0.0.1:8080/v1</code></div>
+    </section>
+
+    <section class="card docs-section" aria-labelledby="example-heading">
+      <div class="panel-header docs-example-heading">
+        <div>
+          <h2 id="example-heading">Send a request</h2>
+          <p class="small muted" style="margin: 4px 0 0;">Each example uses the same gateway key and trusted accounting identity.</p>
+        </div>
+        <button id="copy-example-button" class="icon-button" type="button">Copy example</button>
+      </div>
+
+      <div class="tabs" role="tablist" aria-label="Documentation language">
+        <button class="tab active" type="button" role="tab" aria-selected="true" aria-controls="docs-python-panel" data-doc-tab="docs-python-panel">Python</button>
+        <button class="tab" type="button" role="tab" aria-selected="false" aria-controls="docs-typescript-panel" data-doc-tab="docs-typescript-panel">JavaScript</button>
+        <button class="tab" type="button" role="tab" aria-selected="false" aria-controls="docs-curl-panel" data-doc-tab="docs-curl-panel">curl</button>
+      </div>
+
+      <div id="docs-python-panel" class="code-panel" role="tabpanel">
+<pre><code># Install once: pip install openai
+import os
+from openai import OpenAI
+
+client = OpenAI(
+    api_key=os.environ["KILOVOLT_API_KEY"],
+    base_url="http://127.0.0.1:8080/v1",
+)
+
+authenticated_user_id = "user-123"  # derive from the authenticated session
+response = client.chat.completions.create(
+    model="gpt-4o-mini",
+    messages=[{"role": "user", "content": "Hello"}],
+    max_completion_tokens=100,
+    extra_headers={"X-User-ID": authenticated_user_id},
+)
+
+print(response.choices[0].message.content)</code></pre>
+      </div>
+
+      <div id="docs-typescript-panel" class="code-panel" role="tabpanel" hidden>
+<pre><code>// Install once: npm install openai
+import OpenAI from "openai";
+
+const client = new OpenAI({
+  apiKey: process.env.KILOVOLT_API_KEY,
+  baseURL: "http://127.0.0.1:8080/v1",
+});
+
+const authenticatedUserId = "user-123"; // derive from the authenticated session
+const response = await client.chat.completions.create(
+  {
+    model: "gpt-4o-mini",
+    messages: [{ role: "user", content: "Hello" }],
+    max_completion_tokens: 100,
+  },
+  { headers: { "X-User-ID": authenticatedUserId } },
+);
+
+console.log(response.choices[0].message.content);</code></pre>
+      </div>
+
+      <div id="docs-curl-panel" class="code-panel" role="tabpanel" hidden>
+<pre><code>curl http://127.0.0.1:8080/v1/chat/completions \
+  -H "Authorization: Bearer $KILOVOLT_API_KEY" \
+  -H "Content-Type: application/json" \
+  -H "X-User-ID: user-123" \
+  -d '{
+    "model": "gpt-4o-mini",
+    "messages": [{"role": "user", "content": "Hello"}],
+    "max_completion_tokens": 100
+  }'</code></pre>
+      </div>
+
+      <details class="eval-notice trusted-note">
+        <summary><strong>Why must my backend set <code>X-User-ID</code>?</strong></summary>
+        <p><code>X-User-ID</code> is accounting identity, not authentication. Your trusted backend must set or overwrite it after authenticating the user; browsers and mobile clients must not choose arbitrary identities.</p>
+      </details>
+    </section>
+
+    <section class="card docs-section" aria-labelledby="results-heading">
+      <h2 id="results-heading">What happens next</h2>
+      <div class="docs-outcomes">
+        <div><strong>Accepted request</strong><span>Kilovolt forwards the response and records tokens, calculated spend, and latency.</span></div>
+        <div><strong>Budget blocked</strong><span>Kilovolt returns HTTP 429 before spend can exceed the project or user limit.</span></div>
+        <div><strong>Monitor usage</strong><span>Open the local dashboard to review users and recent transactions.</span></div>
+      </div>
+      <div class="button-row">
+        <a class="button" href="/dashboard">Open dashboard</a>
+      </div>
+    </section>
+
+    <section class="github-addon" aria-labelledby="github-heading">
+      <div>
+        <h2 id="github-heading">Need the full reference?</h2>
+        <p class="muted">GitHub has production deployment, configuration, pricing, streaming, security, and troubleshooting guides.</p>
+      </div>
+      <a class="button secondary" href="https://github.com/ytp101/kilovolt/tree/main/docs" target="_blank" rel="noopener noreferrer">Full GitHub documentation ↗</a>
+    </section>
+  </main>
+
+  <div id="docs-copy-toast" class="toast" role="status" hidden>Example copied</div>
+
+  <script>
+    function selectDocumentationTab(tab) {
+      document.querySelectorAll('[data-doc-tab]').forEach(candidate => {
+        const selected = candidate === tab;
+        candidate.classList.toggle('active', selected);
+        candidate.setAttribute('aria-selected', String(selected));
+        document.getElementById(candidate.dataset.docTab).hidden = !selected;
+      });
+    }
+
+    document.querySelectorAll('[data-doc-tab]').forEach(tab => {
+      tab.addEventListener('click', () => selectDocumentationTab(tab));
+    });
+
+    document.getElementById('copy-example-button').addEventListener('click', async () => {
+      const example = document.querySelector('[role="tabpanel"]:not([hidden]) code');
+      await navigator.clipboard.writeText(example.textContent);
+      const toast = document.getElementById('docs-copy-toast');
+      toast.hidden = false;
+      window.setTimeout(() => { toast.hidden = true; }, 1800);
+    });
+  </script>
+</body>
+</html>

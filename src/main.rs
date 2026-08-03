@@ -21,7 +21,9 @@ use crate::config::{
     AppState, DEFAULT_MAX_REQUEST_BODY_BYTES, DEFAULT_MAX_SSE_FRAME_BYTES,
     DEFAULT_MAX_UPSTREAM_BODY_BYTES, DEFAULT_TELEMETRY_URL, EvaluationSetupState, TelemetryConfig,
 };
-use crate::dashboard::{get_dashboard, get_root, get_stats, post_evaluation_test, post_setup};
+use crate::dashboard::{
+    get_dashboard, get_documentation, get_root, get_stats, post_evaluation_test, post_setup,
+};
 use crate::ledger::BudgetLedger;
 use crate::pricing::PricingRegistry;
 use crate::proxy::{chat_completions_proxy, mock_chat_completions};
@@ -694,6 +696,7 @@ async fn main() {
         .route("/evaluation/test", post(post_evaluation_test))
         .route("/health", get(health_check))
         .route("/dashboard", get(get_dashboard))
+        .route("/documentation", get(get_documentation))
         .route("/api/stats", get(get_stats))
         .route("/v1/chat/completions", post(chat_completions_proxy))
         .route("/mock/v1/chat/completions", post(mock_chat_completions))
