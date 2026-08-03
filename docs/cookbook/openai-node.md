@@ -12,15 +12,16 @@ Web client -> authenticated Node backend -> X-User-ID -> Kilovolt -> OpenAI
 
 ## Prerequisites
 
-Node.js 20+, `npm install openai`, Kilovolt, and `OPENAI_API_KEY`.
+Node.js 20+, `npm install openai`, a running browser-evaluation Kilovolt
+container, and the generated Kilovolt gateway key shown after setup.
 
 ## Complete configuration
 
+Start with the [one-command Docker flow](docker-deployment.md), complete browser
+setup, then copy the generated key into the trusted backend environment:
+
 ```bash
-export KILOVOLT_PROJECT_BUDGET=100
-export KILOVOLT_DEFAULT_BUDGET=5
-export KILOVOLT_TELEMETRY_ENABLED=false
-export OPENAI_API_KEY='provider-secret'
+export KILOVOLT_GATEWAY_KEY='generated-kilovolt-gateway-key'
 ```
 
 ## Complete runnable code
@@ -29,7 +30,7 @@ export OPENAI_API_KEY='provider-secret'
 import OpenAI from 'openai';
 
 const client = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY,
+  apiKey: process.env.KILOVOLT_GATEWAY_KEY,
   baseURL: 'http://127.0.0.1:8080/v1',
 });
 
@@ -51,8 +52,7 @@ process.stdout.write('\n');
 
 ## Verify it works
 
-Run `node example.mjs` and check the authenticated customer dashboard for
-`user_123`.
+Run `node example.mjs` and check the local dashboard for `user_123`.
 
 ## Expected success behavior
 
@@ -67,10 +67,13 @@ the iterator early.
 ## Security notes
 
 Run this code server-side only. Do not use `dangerouslyAllowBrowser`, and do not
-copy an untrusted request header into `X-User-ID`.
+copy an untrusted request header into `X-User-ID`. Keep the generated gateway
+key and provider key out of browser code.
 
 ## Common failure modes
 
 ESM projects need `"type": "module"` or an `.mjs` file. Missing `Content-Type`
 is handled by the SDK; incorrect base URL or private-network routing causes
-connection errors.
+connection errors. Configured manual mode instead uses the provider key as the
+SDK key and may also require `X-Kilovolt-Key`; see
+[proxy authentication](proxy-authentication.md).

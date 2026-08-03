@@ -149,10 +149,11 @@ impl<S> StreamMonitor<S> {
 
     fn try_charge_output_tokens(&mut self, new_tokens: usize) -> Result<(), BudgetError> {
         let incremental_cost = new_tokens as f64 * self.pricing.output_cost_per_token;
+        let (project_budget_limit, _) = self.state.effective_budgets();
         let snapshot = self.state.budget_ledger.try_charge_output(
             &self.user_id,
             incremental_cost,
-            self.state.project_budget,
+            project_budget_limit,
             self.user_budget_limit,
         )?;
 
@@ -324,9 +325,10 @@ impl<S> StreamMonitor<S> {
             }
         };
         if let Err(error) = self.try_charge_output_tokens(output_tokens) {
+            let (project_budget_limit, _) = self.state.effective_budgets();
             warn!(
                 user_id = %self.user_id,
-                project_budget_limit = %self.state.project_budget,
+                project_budget_limit = %project_budget_limit,
                 user_budget_limit = %self.user_budget_limit,
                 error = %error,
                 "Budget rejected an OpenAI-compatible output increment"

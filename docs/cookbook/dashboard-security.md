@@ -1,5 +1,9 @@
 # Customer dashboard security
 
+This page documents configured manual mode. The localhost-only browser
+evaluation quick start has no separate dashboard login; do not expose that
+evaluation port beyond host loopback.
+
 ## Goal
 
 Access local operational/budget data without exposing it publicly.

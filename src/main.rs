@@ -19,9 +19,9 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 use crate::config::{
     AppState, DEFAULT_MAX_REQUEST_BODY_BYTES, DEFAULT_MAX_SSE_FRAME_BYTES,
-    DEFAULT_MAX_UPSTREAM_BODY_BYTES, DEFAULT_TELEMETRY_URL, TelemetryConfig,
+    DEFAULT_MAX_UPSTREAM_BODY_BYTES, DEFAULT_TELEMETRY_URL, EvaluationSetupState, TelemetryConfig,
 };
-use crate::dashboard::{get_dashboard, get_stats};
+use crate::dashboard::{get_dashboard, get_root, get_stats, post_evaluation_test, post_setup};
 use crate::ledger::BudgetLedger;
 use crate::pricing::PricingRegistry;
 use crate::proxy::{chat_completions_proxy, mock_chat_completions};
@@ -29,6 +29,10 @@ use crate::proxy::{chat_completions_proxy, mock_chat_completions};
 /// Simple health check probe.
 async fn health_check() -> &'static str {
     "OK"
+}
+
+fn is_docker_environment() -> bool {
+    std::path::Path::new("/.dockerenv").exists()
 }
 
 /// Helper function to retrieve or generate a persistent anonymous client hash.
@@ -84,7 +88,7 @@ async fn send_startup_telemetry(
         telemetry_endpoint
     );
 
-    let is_docker = std::path::Path::new("/.dockerenv").exists();
+    let is_docker = is_docker_environment();
 
     let payload = startup_telemetry_payload(&client_hash, current_version, is_docker, &os, &arch);
 
@@ -401,6 +405,7 @@ async fn main() {
     info!("Starting Kilovolt (kvlt) gateway engine...");
 
     // Extract dynamic environment variables with safe production fallbacks
+    let docker_environment = is_docker_environment();
     let port = std::env::var("KILOVOLT_PORT")
         .ok()
         .and_then(|s| s.parse::<u16>().ok())
@@ -408,7 +413,13 @@ async fn main() {
     let bind = std::env::var("BIND_ADDR")
         .ok()
         .or_else(|| std::env::var("HOST").ok())
-        .unwrap_or_else(|| "127.0.0.1".to_string());
+        .unwrap_or_else(|| {
+            if docker_environment {
+                "0.0.0.0".to_string()
+            } else {
+                "127.0.0.1".to_string()
+            }
+        });
     let addr = bind_address(&bind, port);
 
     let default_budget_raw = std::env::var("KILOVOLT_DEFAULT_BUDGET").ok();
@@ -527,13 +538,23 @@ async fn main() {
     if mock_upstream_enabled {
         warn!("Embedded mock upstream enabled for local evaluation; do not use it in production");
     }
-    validate_deployment_safety(
-        &bind,
-        acknowledge_process_local_ledger,
-        proxy_token.is_some(),
-        allow_unauthenticated_public_proxy,
-    )
-    .unwrap_or_else(|message| fatal_configuration(&message));
+    let browser_setup_mode = docker_environment
+        && proxy_token.is_none()
+        && !allow_unauthenticated_public_proxy
+        && !mock_upstream_enabled;
+    if browser_setup_mode {
+        warn!(
+            "Evaluation setup mode enabled: only localhost host publishing is supported; setup and spend reset when the process restarts"
+        );
+    } else {
+        validate_deployment_safety(
+            &bind,
+            acknowledge_process_local_ledger,
+            proxy_token.is_some(),
+            allow_unauthenticated_public_proxy,
+        )
+        .unwrap_or_else(|message| fatal_configuration(&message));
+    }
 
     let pricing_file = std::env::var("KILOVOLT_PRICING_FILE").ok();
     let pricing_registry = PricingRegistry::load(pricing_file.as_deref().map(std::path::Path::new))
@@ -543,7 +564,7 @@ async fn main() {
         .ok()
         .filter(|token| !token.is_empty())
         .map(Arc::<str>::from);
-    if dashboard_token.is_none() {
+    if dashboard_token.is_none() && !browser_setup_mode {
         warn!("Customer dashboard disabled: set KILOVOLT_DASHBOARD_TOKEN and restart to enable it");
     }
 
@@ -590,6 +611,7 @@ async fn main() {
         mock_upstream_enabled = %mock_upstream_enabled,
         process_local_ledger_acknowledged = %acknowledge_process_local_ledger,
         allow_unauthenticated_public_proxy = %allow_unauthenticated_public_proxy,
+        browser_setup_mode = %browser_setup_mode,
         bind_address = %addr,
         dashboard_enabled = %dashboard_token.is_some(),
         company_telemetry_enabled = %telemetry.enabled,
@@ -634,6 +656,7 @@ async fn main() {
         proxy_token,
         mock_upstream_enabled,
         dashboard_token,
+        evaluation_setup: browser_setup_mode.then(|| Arc::new(EvaluationSetupState::new())),
         telemetry: telemetry.clone(),
         per_step_tokens,
         per_pipeline_tokens,
@@ -666,6 +689,9 @@ async fn main() {
 
     // Build the Axum Router
     let app = Router::new()
+        .route("/", get(get_root))
+        .route("/setup", post(post_setup))
+        .route("/evaluation/test", post(post_evaluation_test))
         .route("/health", get(health_check))
         .route("/dashboard", get(get_dashboard))
         .route("/api/stats", get(get_stats))
@@ -681,6 +707,11 @@ async fn main() {
         }
     };
     info!("Kilovolt listening on http://{}", addr);
+    if browser_setup_mode {
+        println!(
+            "Kilovolt is ready.\n\nOpen:\nhttp://127.0.0.1:{port}\n\nEvaluation mode: configuration and calculated spend are temporary."
+        );
+    }
 
     if let Err(e) = axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())

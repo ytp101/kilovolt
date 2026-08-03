@@ -9,8 +9,8 @@ implicit application project.
 ```mermaid
 flowchart LR
     C["Browser or mobile client"] -->|"authenticated application request"| B["Founder's backend"]
-    B -->|"Bearer provider key + optional X-Kilovolt-Key + trusted X-User-ID"| K["Kilovolt"]
-    K -->|"OpenAI-compatible or translated request"| P["AI provider"]
+    B -->|"Bearer Kilovolt gateway key or manual provider key + trusted X-User-ID"| K["Kilovolt"]
+    K -->|"OpenAI-compatible request with provider credential"| P["AI provider"]
     K --> D["Local customer dashboard"]
     K -. "only when explicitly enabled" .-> T["Kilovolt company telemetry endpoint"]
 ```
@@ -21,8 +21,11 @@ untrusted browser or mobile client.
 
 ## Proxy lifecycle
 
-1. Validate the optional `X-Kilovolt-Key` before reading the body or reserving
-   money, then validate `Authorization` and `Content-Type`.
+1. Require completed setup in browser evaluation mode, validate its generated
+   bearer gateway key, and substitute the in-memory provider key. Configured
+   manual mode instead validates optional `X-Kilovolt-Key` and forwards the
+   provider bearer credential. Authentication happens before body parsing or a
+   budget reservation; both paths then validate `Content-Type`.
 2. Read at most `KILOVOLT_MAX_REQUEST_BODY_BYTES`.
 3. Parse the supported chat-completions fields and estimate prompt tokens.
 4. Check optional token gates.
@@ -122,9 +125,10 @@ rejected before reservation.
 ## Dashboard and telemetry data paths
 
 The customer dashboard is embedded in the Rust process. `/api/stats` reads the
-same in-memory ledger and local request deque used by the proxy. Both dashboard
-routes require `KILOVOLT_DASHBOARD_TOKEN`; if it is absent, the routes return
-`503`.
+same in-memory ledger and local request deque used by the proxy. Browser
+evaluation mode serves setup and the dashboard without a separate login because
+the documented host port is loopback-only. Configured manual mode requires
+`KILOVOLT_DASHBOARD_TOKEN`; if it is absent, dashboard routes return `503`.
 
 Company telemetry is a separate outbound path and is disabled by default.
 Enabling it sends explicitly documented aggregate payloads to
@@ -133,7 +137,9 @@ dashboard do not provide data to the customer dashboard.
 
 ## Process and persistence limits
 
-- Financial and token state is in memory and resets on restart.
+- Browser setup, provider configuration, financial state, and token state are in
+  memory and reset on process restart. Manual configuration is re-read from the
+  environment, but its financial state still resets.
 - Each process has an independent project ledger. Multiple replicas do not
   provide a shared budget and can collectively exceed the intended limit.
 - Non-loopback startup requires explicit acknowledgement of these properties,

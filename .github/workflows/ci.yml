@@ -58,69 +58,116 @@ jobs:
             exit 1
           fi
           grep -Fq 'KILOVOLT_TELEMETRY_URL' <<<"${invalid_output}"
-      - name: Run normal self-hosted Compose journey
+      - name: Run one-command browser evaluation journey
         run: |
+          image='yodsarun/kilovolt-proxy:latest'
+          provider_key='sk-ci-provider-secret-ABCD'
+          log_file="$(mktemp)"
+          setup_file="$(mktemp)"
+          stats_file="$(mktemp)"
+          docker_pid=''
+
           cleanup() {
-            docker compose down --remove-orphans >/dev/null 2>&1 || true
-            rm -f .env
+            container_id="$(docker ps -aq --filter "ancestor=${image}" | head -n 1)"
+            if [[ -n "${container_id}" ]]; then
+              docker stop "${container_id}" >/dev/null 2>&1 || true
+              docker rm "${container_id}" >/dev/null 2>&1 || true
+            fi
+            if [[ -n "${docker_pid}" ]]; then
+              wait "${docker_pid}" 2>/dev/null || true
+            fi
+            rm -f "${log_file}" "${setup_file}" "${stats_file}"
           }
           trap cleanup EXIT
 
-          if missing_env_output="$(docker compose config --quiet 2>&1)"; then
-            echo "normal Compose unexpectedly validated without .env" >&2
-            exit 1
-          fi
-          grep -Fq '.env' <<<"${missing_env_output}"
+          docker build -t "${image}" .
+          t0="$(date +%s%3N)"
+          docker run -p 127.0.0.1:8080:8080 yodsarun/kilovolt-proxy:latest >"${log_file}" 2>&1 &
+          docker_pid="$!"
 
-          cp .env.example .env
-          sed -i 's/^KILOVOLT_HOST_PORT=.*/KILOVOLT_HOST_PORT=18081/' .env
-          docker compose config --quiet
-          docker compose up -d
-
-          empty_proxy_rejected=false
-          for _ in $(seq 1 10); do
-            if docker compose logs --no-color kilovolt 2>&1 |
-              grep -Fq 'Non-loopback startup requires KILOVOLT_PROXY_TOKEN'; then
-              empty_proxy_rejected=true
-              break
-            fi
-            sleep 1
-          done
-          if curl --silent --fail http://127.0.0.1:18081/health >/dev/null 2>&1; then
-            echo "container became healthy with an empty proxy token" >&2
-            exit 1
-          fi
-          test "${empty_proxy_rejected}" = true
-          docker compose down --remove-orphans
-
-          sed -i 's/^KILOVOLT_PROXY_TOKEN=.*/KILOVOLT_PROXY_TOKEN=ci-proxy-token/' .env
-          sed -i 's/^KILOVOLT_DASHBOARD_TOKEN=.*/KILOVOLT_DASHBOARD_TOKEN=ci-dashboard-token/' .env
-          docker compose config --quiet
-          docker compose up -d
-
-          health_status=""
           for _ in $(seq 1 60); do
-            health_status="$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{end}}' kilovolt 2>/dev/null || true)"
-            if [[ "${health_status}" == "healthy" ]]; then
-              break
-            fi
-            if [[ "$(docker inspect --format '{{.State.Status}}' kilovolt 2>/dev/null || true)" == "exited" ]]; then
+            if curl --silent --fail http://127.0.0.1:8080/ >"${setup_file}"; then
               break
             fi
             sleep 1
           done
+          t1="$(date +%s%3N)"
+          grep -Fq 'Finish setup' "${setup_file}"
+          test "$(curl --fail --silent http://127.0.0.1:8080/health)" = 'OK'
+          grep -Fxq 'Kilovolt is ready.' "${log_file}"
+          grep -Fxq 'http://127.0.0.1:8080' "${log_file}"
+          grep -Fxq 'Evaluation mode: configuration and calculated spend are temporary.' "${log_file}"
 
-          if [[ "${health_status}" != "healthy" ]]; then
-            docker compose ps --all >&2 || true
-            docker compose logs --no-color kilovolt >&2 || true
-            echo "normal Compose health timeout" >&2
-            exit 1
-          fi
-          test "$(curl --fail --silent http://127.0.0.1:18081/health)" = "OK"
-          docker compose ps
-          docker compose down --remove-orphans
-          rm -f .env
-          trap - EXIT
+          test "$(curl --silent --output /dev/null --write-out '%{http_code}' \
+            --data-urlencode 'provider_api_key=' \
+            --data-urlencode 'project_budget=10' \
+            --data-urlencode 'default_budget=1' \
+            http://127.0.0.1:8080/setup)" = '422'
+          test "$(curl --silent --output /dev/null --write-out '%{http_code}' \
+            --data-urlencode "provider_api_key=${provider_key}" \
+            --data-urlencode 'project_budget=not-a-number' \
+            --data-urlencode 'default_budget=1' \
+            http://127.0.0.1:8080/setup)" = '422'
+
+          curl --silent --fail \
+            --data-urlencode "provider_api_key=${provider_key}" \
+            --data-urlencode 'project_budget=10' \
+            --data-urlencode 'default_budget=1' \
+            http://127.0.0.1:8080/setup >"${setup_file}"
+          t2="$(date +%s%3N)"
+          ! grep -Fq "${provider_key}" "${setup_file}"
+          grep -Fq '••••ABCD' "${setup_file}"
+          gateway_key="$(grep -Eo 'kvlt_[0-9a-f]{64}' "${setup_file}" | head -n 1)"
+          test "${#gateway_key}" = '69'
+
+          test "$(curl --silent --output /dev/null --write-out '%{http_code}' \
+            --data-urlencode 'provider_api_key=sk-replacement' \
+            --data-urlencode 'project_budget=20' \
+            --data-urlencode 'default_budget=2' \
+            http://127.0.0.1:8080/setup)" = '404'
+
+          test "$(curl --silent --output /tmp/invalid-gateway.json --write-out '%{http_code}' \
+            -H 'Authorization: Bearer wrong-gateway' \
+            -H 'X-User-ID: ci-user' \
+            -H 'Content-Type: application/json' \
+            --data '{"model":"unpriced-ci-model","messages":[{"role":"user","content":"test"}],"max_completion_tokens":1}' \
+            http://127.0.0.1:8080/v1/chat/completions)" = '401'
+          grep -Fq 'kilovolt_gateway_auth_failed' /tmp/invalid-gateway.json
+
+          test "$(curl --silent --output /tmp/valid-gateway.json --write-out '%{http_code}' \
+            -H "Authorization: Bearer ${gateway_key}" \
+            -H 'X-User-ID: ci-user' \
+            -H 'Content-Type: application/json' \
+            --data '{"model":"unpriced-ci-model","messages":[{"role":"user","content":"test"}],"max_completion_tokens":1}' \
+            http://127.0.0.1:8080/v1/chat/completions)" = '400'
+          grep -Fq 'model_pricing_not_configured' /tmp/valid-gateway.json
+
+          curl --silent --fail http://127.0.0.1:8080/api/stats >"${stats_file}"
+          grep -Fq '"project_budget_usd":10.0' "${stats_file}"
+          ! grep -Fq "${provider_key}" "${log_file}"
+          ! grep -Fq "${provider_key}" "${setup_file}"
+          ! grep -Fq "${provider_key}" "${stats_file}"
+
+          printf 'T0->T1 dashboard reachable: %sms\n' "$((t1 - t0))"
+          printf 'T1->T2 setup complete: %sms\n' "$((t2 - t1))"
+
+          container_id="$(docker ps -q --filter "ancestor=${image}" | head -n 1)"
+          docker stop "${container_id}"
+          wait "${docker_pid}" || true
+          docker rm "${container_id}"
+          docker_pid=''
+
+          : >"${log_file}"
+          docker run -p 127.0.0.1:8080:8080 yodsarun/kilovolt-proxy:latest >"${log_file}" 2>&1 &
+          docker_pid="$!"
+          for _ in $(seq 1 60); do
+            if curl --silent --fail http://127.0.0.1:8080/ >"${setup_file}"; then
+              break
+            fi
+            sleep 1
+          done
+          grep -Fq 'Finish setup' "${setup_file}"
+          rm -f /tmp/invalid-gateway.json /tmp/valid-gateway.json
       - name: Run provider-free demo Compose journey
         run: |
           cleanup() {

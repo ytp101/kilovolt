@@ -1,5 +1,5 @@
 use std::collections::{HashMap, VecDeque};
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 use std::time::Instant;
@@ -18,6 +18,83 @@ pub const DEFAULT_TELEMETRY_URL: &str = "https://kilovolt.vercel.app/v1/update-c
 pub struct TelemetryConfig {
     pub enabled: bool,
     pub endpoint: String,
+}
+
+/// Temporary browser-configured credentials and limits for the local evaluation
+/// flow. This type intentionally implements neither `Debug` nor serialization so
+/// provider and gateway credentials cannot be logged accidentally.
+#[derive(Clone)]
+pub struct EvaluationSetup {
+    provider_api_key: Arc<str>,
+    gateway_key: Arc<str>,
+    project_budget: f64,
+    default_budget: f64,
+}
+
+impl EvaluationSetup {
+    pub fn provider_api_key(&self) -> &str {
+        &self.provider_api_key
+    }
+
+    pub fn gateway_key(&self) -> &str {
+        &self.gateway_key
+    }
+
+    pub fn budgets(&self) -> (f64, f64) {
+        (self.project_budget, self.default_budget)
+    }
+}
+
+pub struct EvaluationSetupState {
+    configured: RwLock<Option<EvaluationSetup>>,
+    test_succeeded: AtomicBool,
+}
+
+impl EvaluationSetupState {
+    pub fn new() -> Self {
+        Self {
+            configured: RwLock::new(None),
+            test_succeeded: AtomicBool::new(false),
+        }
+    }
+
+    pub fn snapshot(&self) -> Option<EvaluationSetup> {
+        self.configured.read().unwrap().clone()
+    }
+
+    pub fn complete(
+        &self,
+        provider_api_key: Arc<str>,
+        gateway_key: Arc<str>,
+        project_budget: f64,
+        default_budget: f64,
+    ) -> bool {
+        let mut configured = self.configured.write().unwrap();
+        if configured.is_some() {
+            return false;
+        }
+        *configured = Some(EvaluationSetup {
+            provider_api_key,
+            gateway_key,
+            project_budget,
+            default_budget,
+        });
+        true
+    }
+
+    pub fn mark_test_succeeded(&self) {
+        self.test_succeeded.store(true, Ordering::Release);
+    }
+
+    pub fn test_succeeded(&self) -> bool {
+        self.test_succeeded.load(Ordering::Acquire)
+    }
+}
+
+impl Default for EvaluationSetupState {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 /// Compares secret bytes without data-dependent early exit.
@@ -51,6 +128,7 @@ pub struct AppState {
     pub proxy_token: Option<Arc<str>>,
     pub mock_upstream_enabled: bool,
     pub dashboard_token: Option<Arc<str>>,
+    pub evaluation_setup: Option<Arc<EvaluationSetupState>>,
     pub telemetry: TelemetryConfig,
 
     // Token budget configuration
@@ -76,6 +154,56 @@ pub struct AppState {
 }
 
 impl AppState {
+    pub fn evaluation_mode(&self) -> bool {
+        self.evaluation_setup.is_some()
+    }
+
+    pub fn evaluation_setup_snapshot(&self) -> Option<EvaluationSetup> {
+        self.evaluation_setup
+            .as_ref()
+            .and_then(|setup| setup.snapshot())
+    }
+
+    pub fn evaluation_setup_complete(&self) -> bool {
+        self.evaluation_setup_snapshot().is_some()
+    }
+
+    pub fn complete_evaluation_setup(
+        &self,
+        provider_api_key: Arc<str>,
+        gateway_key: Arc<str>,
+        project_budget: f64,
+        default_budget: f64,
+    ) -> bool {
+        self.evaluation_setup.as_ref().is_some_and(|setup| {
+            setup.complete(
+                provider_api_key,
+                gateway_key,
+                project_budget,
+                default_budget,
+            )
+        })
+    }
+
+    pub fn effective_budgets(&self) -> (f64, f64) {
+        self.evaluation_setup_snapshot()
+            .map_or((self.project_budget, self.default_budget), |setup| {
+                setup.budgets()
+            })
+    }
+
+    pub fn mark_evaluation_test_succeeded(&self) {
+        if let Some(setup) = &self.evaluation_setup {
+            setup.mark_test_succeeded();
+        }
+    }
+
+    pub fn evaluation_test_succeeded(&self) -> bool {
+        self.evaluation_setup
+            .as_ref()
+            .is_some_and(|setup| setup.test_succeeded())
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn record_request(
         &self,
@@ -185,6 +313,7 @@ pub(crate) fn test_state_with_budgets(
         proxy_token: None,
         mock_upstream_enabled: true,
         dashboard_token: Some(Arc::from("test-dashboard-token")),
+        evaluation_setup: None,
         telemetry: TelemetryConfig {
             enabled: false,
             endpoint: DEFAULT_TELEMETRY_URL.to_string(),
@@ -206,8 +335,17 @@ pub(crate) fn test_state_with_budgets(
 }
 
 #[cfg(test)]
+pub(crate) fn test_evaluation_state(port: u16) -> AppState {
+    let mut state = test_state_with_budgets(port, 10.0, 1.0);
+    state.mock_upstream_enabled = false;
+    state.dashboard_token = None;
+    state.evaluation_setup = Some(Arc::new(EvaluationSetupState::new()));
+    state
+}
+
+#[cfg(test)]
 mod tests {
-    use super::{secrets_match, test_state};
+    use super::{secrets_match, test_evaluation_state, test_state};
     use axum::{Json, Router, routing::post};
     use serde_json::Value;
     use std::time::Duration;
@@ -218,6 +356,37 @@ mod tests {
         assert!(!secrets_match("proxy-secret", "proxy-secreu"));
         assert!(!secrets_match("proxy-secret", "proxy-secret-longer"));
         assert!(!secrets_match("proxy-secret", ""));
+    }
+
+    #[test]
+    fn evaluation_setup_is_one_time_and_supplies_effective_budgets() {
+        let state = test_evaluation_state(0);
+        assert!(state.evaluation_mode());
+        assert!(!state.evaluation_setup_complete());
+        assert!(!state.evaluation_test_succeeded());
+        assert_eq!(state.effective_budgets(), (10.0, 1.0));
+
+        assert!(state.complete_evaluation_setup(
+            "provider-secret".into(),
+            "gateway-secret".into(),
+            4.0,
+            0.5,
+        ));
+        assert!(!state.complete_evaluation_setup(
+            "replacement-provider".into(),
+            "replacement-gateway".into(),
+            8.0,
+            2.0,
+        ));
+
+        let configured = state
+            .evaluation_setup_snapshot()
+            .expect("evaluation setup should be configured");
+        assert_eq!(configured.provider_api_key(), "provider-secret");
+        assert_eq!(configured.gateway_key(), "gateway-secret");
+        assert_eq!(state.effective_budgets(), (4.0, 0.5));
+        state.mark_evaluation_test_succeeded();
+        assert!(state.evaluation_test_succeeded());
     }
 
     async fn telemetry_receiver(

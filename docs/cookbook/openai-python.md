@@ -13,17 +13,16 @@ Browser -> authenticated Python backend -> trusted X-User-ID -> Kilovolt -> Open
 
 ## Prerequisites
 
-Python 3.10+, `pip install openai`, a running Kilovolt process, and
-`OPENAI_API_KEY`.
+Python 3.10+, `pip install openai`, a running browser-evaluation Kilovolt
+container, and the generated Kilovolt gateway key shown after setup.
 
 ## Complete configuration
 
+Start with the [one-command Docker flow](docker-deployment.md), complete browser
+setup, then copy the generated key into the trusted backend environment:
+
 ```bash
-export KILOVOLT_PROJECT_BUDGET=100
-export KILOVOLT_DEFAULT_BUDGET=5
-export KILOVOLT_DASHBOARD_TOKEN="$(openssl rand -hex 32)"
-export KILOVOLT_TELEMETRY_ENABLED=false
-export OPENAI_API_KEY='provider-secret'
+export KILOVOLT_GATEWAY_KEY='generated-kilovolt-gateway-key'
 ```
 
 ## Complete runnable code
@@ -33,7 +32,7 @@ import os
 from openai import OpenAI
 
 client = OpenAI(
-    api_key=os.environ["OPENAI_API_KEY"],
+    api_key=os.environ["KILOVOLT_GATEWAY_KEY"],
     base_url="http://127.0.0.1:8080/v1",
 )
 
@@ -55,6 +54,7 @@ response = client.chat.completions.create(
     model="gpt-4o-mini",
     messages=[{"role": "user", "content": "Reply with OK."}],
     stream=False,
+    max_completion_tokens=100,
     extra_headers={"X-User-ID": trusted_user_id},
 )
 print(response.choices[0].message.content)
@@ -62,8 +62,8 @@ print(response.choices[0].message.content)
 
 ## Verify it works
 
-Run the script, then authenticate to `/api/stats` and confirm `user_123` appears
-under `current_spend_by_user`.
+Run the script, then open the local dashboard or `/api/stats` and confirm
+`user_123` appears under `current_spend_by_user`.
 
 ## Expected success behavior
 
@@ -78,9 +78,12 @@ Mid-stream cutoff appears as an early stream end.
 ## Security notes
 
 Never accept a raw `X-User-ID` from the browser. Derive it from the authenticated
-session, and do not expose `OPENAI_API_KEY` to client code.
+session. Keep both the generated gateway key and provider key out of browser
+code; Kilovolt holds the provider key only in its evaluation process memory.
 
 ## Common failure modes
 
-Use `base_url` ending in `/v1`; send `stream=True` for Gemini translation; verify
-the model price assumptions; a public HTTP URL leaks credentials without TLS.
+Use `base_url` ending in `/v1`; browser evaluation accepts OpenAI models only;
+verify model-price assumptions. A public HTTP URL leaks credentials without TLS.
+Configured manual mode instead uses the provider key as the SDK key and may also
+require `X-Kilovolt-Key`; see [proxy authentication](proxy-authentication.md).

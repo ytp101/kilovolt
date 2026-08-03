@@ -5,8 +5,8 @@ provider account or real API key. It uses the disabled-by-default embedded mock,
 fake local credentials, tiny in-memory budgets, and one container.
 
 This page is a provider-free evaluation, not the normal customer installation.
-For a real OpenAI-compatible provider, use the top-level `docker-compose.yml` and
-`.env.example` in the [README installation guide](../README.md#install-with-docker).
+For a real OpenAI-compatible provider, use the one-command browser setup in the
+[README quick start](../README.md#quick-start).
 
 ## Minute 0–5: start the demo
 
