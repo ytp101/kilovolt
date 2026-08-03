@@ -21,6 +21,66 @@ jobs:
       - run: cargo clippy --all-targets --all-features -- -D warnings
       - run: cargo test --all-targets --all-features
       - run: cargo build --release
+      - name: Validate demo Compose configuration
+        run: docker compose -f docker-compose.demo.yml config --quiet
+      - name: Verify the demo smoke test fails when Kilovolt is unavailable
+        run: |
+          cleanup_probe="$(mktemp -d)"
+          cleanup() {
+            rmdir "${cleanup_probe}" 2>/dev/null || true
+          }
+          trap cleanup EXIT
+
+          if KILOVOLT_DEMO_TMP_PARENT="${cleanup_probe}" \
+            KILOVOLT_DEMO_BASE_URL=http://127.0.0.1:18081 \
+            KILOVOLT_DEMO_HEALTH_ATTEMPTS=1 \
+            scripts/demo-smoke.sh; then
+            echo "demo smoke unexpectedly passed without a service" >&2
+            exit 1
+          fi
+          if [[ -n "$(find "${cleanup_probe}" -mindepth 1 -print -quit)" ]]; then
+            echo "demo smoke left temporary state after failure" >&2
+            exit 1
+          fi
+      - name: Verify invalid financial configuration fails cleanly
+        run: |
+          if invalid_output="$(KILOVOLT_PROJECT_BUDGET=not-a-budget \
+            target/release/kilovolt 2>&1)"; then
+            printf '%s\n' "${invalid_output}" >&2
+            echo "Kilovolt unexpectedly started with an invalid project budget" >&2
+            exit 1
+          fi
+          grep -Fq 'KILOVOLT_PROJECT_BUDGET' <<<"${invalid_output}"
+      - name: Run the 15-minute demo smoke test
+        run: |
+          demo_dir="$(mktemp -d)"
+          server_pid=""
+          cleanup() {
+            if [[ -n "${server_pid}" ]]; then
+              kill "${server_pid}" 2>/dev/null || true
+              wait "${server_pid}" 2>/dev/null || true
+            fi
+            rm -rf -- "${demo_dir}"
+          }
+          trap cleanup EXIT
+
+          env \
+            BIND_ADDR=127.0.0.1 \
+            KILOVOLT_PORT=18080 \
+            KILOVOLT_PROJECT_BUDGET=0.000100 \
+            KILOVOLT_DEFAULT_BUDGET=0.000010 \
+            KILOVOLT_PROXY_TOKEN=demo-proxy-token \
+            KILOVOLT_DASHBOARD_TOKEN=demo-dashboard-token \
+            KILOVOLT_ENABLE_MOCK_UPSTREAM=true \
+            KILOVOLT_NON_STREAM_DEFAULT_MAX_OUTPUT_TOKENS=16 \
+            KILOVOLT_TELEMETRY_ENABLED=false \
+            target/release/kilovolt >"${demo_dir}/kilovolt.log" 2>&1 &
+          server_pid="$!"
+
+          if ! scripts/demo-smoke.sh; then
+            cat "${demo_dir}/kilovolt.log" >&2
+            exit 1
+          fi
       - run: python3 scripts/check-docs.py
       - run: scripts/smoke-cookbook.sh
       - run: python3 scripts/telemetry-smoke.py

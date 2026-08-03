@@ -1,7 +1,10 @@
 # Configuration reference
 
 All configuration is read from the environment at startup. Every change in this
-table therefore requires a process restart.
+table therefore requires a process restart. Startup fails with a named
+configuration error for invalid financial limits, strict security booleans,
+pricing files, non-stream output defaults, deployment exposure, or provider URLs.
+There is no separate configuration-file schema or validation CLI in this phase.
 
 | Variable | Type | Default / required | Security and behavior | Example |
 |---|---|---|---|---|

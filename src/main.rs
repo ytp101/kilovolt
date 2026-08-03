@@ -269,6 +269,31 @@ fn parse_optional_positive_size(
     }
 }
 
+fn parse_budget_limit(raw: Option<&str>, default: f64, variable: &str) -> Result<f64, String> {
+    let Some(raw) = raw else {
+        return Ok(default);
+    };
+    let value = raw
+        .trim()
+        .parse::<f64>()
+        .map_err(|_| format!("{variable} must be a finite non-negative USD amount"))?;
+    if !value.is_finite() || value < 0.0 {
+        return Err(format!(
+            "{variable} must be a finite non-negative USD amount"
+        ));
+    }
+    Ok(value)
+}
+
+fn validate_http_url(raw: &str, variable: &str) -> Result<(), String> {
+    let url = reqwest::Url::parse(raw)
+        .map_err(|error| format!("{variable} must be an absolute HTTP(S) URL: {error}"))?;
+    if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
+        return Err(format!("{variable} must be an absolute HTTP(S) URL"));
+    }
+    Ok(())
+}
+
 fn parse_strict_bool(raw: Option<&str>, variable: &str) -> Result<bool, String> {
     match raw.map(str::trim).map(str::to_ascii_lowercase).as_deref() {
         None | Some("0" | "false" | "no" | "off") => Ok(false),
@@ -378,15 +403,21 @@ async fn main() {
         .unwrap_or_else(|| "127.0.0.1".to_string());
     let addr = bind_address(&bind, port);
 
-    let default_budget = std::env::var("KILOVOLT_DEFAULT_BUDGET")
-        .ok()
-        .and_then(|s| s.parse::<f64>().ok())
-        .unwrap_or(1.00);
+    let default_budget_raw = std::env::var("KILOVOLT_DEFAULT_BUDGET").ok();
+    let default_budget = parse_budget_limit(
+        default_budget_raw.as_deref(),
+        1.00,
+        "KILOVOLT_DEFAULT_BUDGET",
+    )
+    .unwrap_or_else(|message| fatal_configuration(&message));
 
-    let project_budget = std::env::var("KILOVOLT_PROJECT_BUDGET")
-        .ok()
-        .and_then(|s| s.parse::<f64>().ok())
-        .unwrap_or(default_budget);
+    let project_budget_raw = std::env::var("KILOVOLT_PROJECT_BUDGET").ok();
+    let project_budget = parse_budget_limit(
+        project_budget_raw.as_deref(),
+        default_budget,
+        "KILOVOLT_PROJECT_BUDGET",
+    )
+    .unwrap_or_else(|message| fatal_configuration(&message));
 
     let per_step_tokens = std::env::var("KILOVOLT_PER_STEP_TOKENS")
         .ok()
@@ -485,6 +516,9 @@ async fn main() {
         "KILOVOLT_ENABLE_MOCK_UPSTREAM",
     )
     .unwrap_or_else(|message| fatal_configuration(&message));
+    if mock_upstream_enabled {
+        warn!("Embedded mock upstream enabled for local evaluation; do not use it in production");
+    }
     validate_deployment_safety(
         &bind,
         acknowledge_process_local_ledger,
@@ -516,6 +550,8 @@ async fn main() {
     };
     let openai_upstream_url = std::env::var("KILOVOLT_OPENAI_UPSTREAM_URL")
         .unwrap_or_else(|_| "https://api.openai.com/v1/chat/completions".to_string());
+    validate_http_url(&openai_upstream_url, "KILOVOLT_OPENAI_UPSTREAM_URL")
+        .unwrap_or_else(|message| fatal_configuration(&message));
     let upstream_header_timeout_seconds = parse_positive_size(
         std::env::var("KILOVOLT_UPSTREAM_HEADER_TIMEOUT_SECONDS")
             .ok()
@@ -644,9 +680,9 @@ async fn main() {
 #[cfg(test)]
 mod tests {
     use super::{
-        bind_address, daily_telemetry_payload, is_loopback_bind, parse_bool,
+        bind_address, daily_telemetry_payload, is_loopback_bind, parse_bool, parse_budget_limit,
         parse_optional_positive_size, parse_positive_size, parse_strict_bool,
-        startup_telemetry_payload, validate_deployment_safety,
+        startup_telemetry_payload, validate_deployment_safety, validate_http_url,
     };
     use std::collections::HashMap;
 
@@ -680,6 +716,39 @@ mod tests {
         assert!(parse_optional_positive_size(Some("0"), "TEST").is_err());
         assert!(parse_strict_bool(Some("invalid"), "TEST").is_err());
         assert!(parse_strict_bool(Some("true"), "TEST").unwrap());
+    }
+
+    #[test]
+    fn financial_limits_must_be_finite_and_non_negative() {
+        assert_eq!(parse_budget_limit(None, 1.0, "TEST").unwrap(), 1.0);
+        assert_eq!(
+            parse_budget_limit(Some(" 0.25 "), 1.0, "TEST").unwrap(),
+            0.25
+        );
+        for invalid in ["", "not-a-number", "-0.01", "NaN", "inf", "-inf"] {
+            assert!(
+                parse_budget_limit(Some(invalid), 1.0, "TEST").is_err(),
+                "{invalid} should fail"
+            );
+        }
+    }
+
+    #[test]
+    fn upstream_url_must_be_absolute_http_or_https() {
+        for valid in [
+            "https://api.openai.com/v1/chat/completions",
+            "http://127.0.0.1:11434/v1/chat/completions",
+        ] {
+            assert!(validate_http_url(valid, "TEST").is_ok(), "{valid}");
+        }
+        for invalid in [
+            "api.openai.com/v1/chat/completions",
+            "/v1/chat/completions",
+            "ftp://example.com/model",
+            "http://",
+        ] {
+            assert!(validate_http_url(invalid, "TEST").is_err(), "{invalid}");
+        }
     }
 
     #[test]

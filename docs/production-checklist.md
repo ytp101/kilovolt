@@ -47,6 +47,10 @@ cargo fmt --check
 cargo clippy --all-targets --all-features -- -D warnings
 cargo test --all-targets --all-features
 cargo build --release
+docker compose -f docker-compose.demo.yml config --quiet
+docker compose -f docker-compose.demo.yml up -d --build
+scripts/demo-smoke.sh
+docker compose -f docker-compose.demo.yml down --remove-orphans
 scripts/run-race-tests.sh 100
 python3 scripts/check-docs.py
 scripts/smoke-cookbook.sh

@@ -62,7 +62,22 @@ Known limitations:
 Gemini models are translated only when `stream=true`. Other provider families
 and API routes are not claimed.
 
-## Quickstart
+## 15-minute local evaluation
+
+Start a complete localhost demo with no provider account or real API key:
+
+```bash
+docker compose -f docker-compose.demo.yml up -d --build
+./scripts/demo-smoke.sh
+```
+
+The smoke test proves a successful request, preflight budget rejection, streaming
+cutoff, authentication failures, fail-closed pricing, stats, and the dashboard.
+Follow the [15-minute design-partner evaluation](docs/quickstart.md) for the exact
+journey, minimal curl/Python/TypeScript integration changes, caveats, presets, and
+rollback.
+
+## Production-style startup
 
 ```bash
 cargo build --release
@@ -180,6 +195,7 @@ was performed.
 
 ## Documentation
 
+- [15-minute design-partner evaluation](docs/quickstart.md)
 - [Architecture and lifecycle](docs/architecture.md)
 - [Security and threat model](docs/security.md)
 - [Configuration reference](docs/configuration.md)
