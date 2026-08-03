@@ -92,7 +92,7 @@ jobs:
             sleep 1
           done
           t1="$(date +%s%3N)"
-          grep -Fq 'Finish setup' "${setup_file}"
+          grep -Fq 'Continue to verification' "${setup_file}"
           test "$(curl --fail --silent http://127.0.0.1:8080/health)" = 'OK'
           grep -Fxq 'Kilovolt is ready.' "${log_file}"
           grep -Fxq 'http://127.0.0.1:8080' "${log_file}"
@@ -166,7 +166,7 @@ jobs:
             fi
             sleep 1
           done
-          grep -Fq 'Finish setup' "${setup_file}"
+          grep -Fq 'Continue to verification' "${setup_file}"
           rm -f /tmp/invalid-gateway.json /tmp/valid-gateway.json
       - name: Run provider-free demo Compose journey
         run: |

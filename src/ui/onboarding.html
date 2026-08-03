@@ -1,0 +1,249 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <link rel="icon" href="data:,">
+  <title>Getting started · Kilovolt</title>
+  <style>{{APP_CSS}}</style>
+</head>
+<body>
+  <header class="app-header">
+    <nav class="shell nav" aria-label="Primary navigation">
+      <a class="brand" href="/">⚡ Kilovolt</a>
+      <div class="nav-links">
+        <a class="active" href="/" aria-current="page">Getting started</a>
+        <a href="/dashboard">Dashboard</a>
+        <a href="https://github.com/ytp101/kilovolt/tree/main/docs" target="_blank" rel="noopener noreferrer">Documentation</a>
+      </div>
+    </nav>
+  </header>
+
+  <main class="main-content onboarding">
+    <ol class="progress" id="progress" aria-label="Setup progress">
+      <li class="complete">1. Configure ✓</li>
+      <li id="verify-progress" class="active" aria-current="step">2. Verify</li>
+      <li id="connect-progress">3. Connect</li>
+    </ol>
+
+    <section id="verify-stage" class="card stage-card" aria-labelledby="verify-heading">
+      <p class="small" style="color: var(--success); font-weight: 800; margin-bottom: 8px;">Setup complete</p>
+      <h1 id="verify-heading">Verify Kilovolt</h1>
+      <p class="lead">Send one small request through Kilovolt's full authentication, budget enforcement, provider, and accounting path.</p>
+
+      <div class="setup-summary">
+        <span>OpenAI key <code>{{PROVIDER_KEY}}</code></span>
+        <span><strong>{{PROJECT_BUDGET}}</strong> project limit</span>
+        <span><strong>{{USER_BUDGET}}</strong> per user</span>
+      </div>
+
+      <div class="notice warning"><strong>This is a paid provider request.</strong> It uses <code>gpt-4o-mini</code> with a 16-token output cap and may create a very small OpenAI charge.</div>
+
+      <div id="verify-action" {{VERIFY_ACTION_HIDDEN}}>
+        <div class="button-row">
+          <button id="test-request-button" class="button" type="button">Send test request</button>
+        </div>
+      </div>
+
+      <section id="test-success" class="result-card" aria-live="polite" {{SUCCESS_HIDDEN}}>
+        <div class="result-heading"><span aria-hidden="true">✓</span> Kilovolt is working</div>
+        <div class="result-grid">
+          <div class="result-item"><span>Model</span><strong id="result-model">{{RESULT_MODEL}}</strong></div>
+          <div class="result-item"><span>Tokens</span><strong id="result-tokens">{{RESULT_TOKENS}}</strong></div>
+          <div class="result-item"><span>Spend</span><strong id="result-spend">{{RESULT_SPEND}}</strong></div>
+          <div class="result-item"><span>Latency</span><strong id="result-latency">{{RESULT_LATENCY}}</strong></div>
+        </div>
+        <div class="button-row">
+          <button id="connect-button" class="button" type="button">Connect my application</button>
+          <button id="run-again-button" class="button secondary" type="button">Run again</button>
+        </div>
+      </section>
+
+      <section id="test-failure" class="failure-panel" aria-live="polite" hidden>
+        <h3>Test request failed</h3>
+        <p id="failure-message">Kilovolt could not complete the request.</p>
+        <button id="try-again-button" class="button secondary" type="button">Try again</button>
+      </section>
+    </section>
+
+    <section id="connect-stage" class="card stage-card" aria-labelledby="connect-heading" hidden>
+      <h1 id="connect-heading" tabindex="-1">Connect your application</h1>
+      <p class="lead">Use this Kilovolt gateway key in your trusted backend. Your OpenAI provider key stays inside Kilovolt.</p>
+
+      <div id="gateway-secret" class="secret-box" data-key="{{GATEWAY_KEY}}">
+        <div class="secret-label">Kilovolt gateway key</div>
+        <div class="secret-row">
+          <code id="gateway-display" class="secret-value">{{MASKED_GATEWAY_KEY}}</code>
+          <div class="secret-actions">
+            <button id="reveal-key-button" class="icon-button" type="button" aria-pressed="false">Reveal</button>
+            <button id="copy-key-button" class="icon-button" type="button">Copy</button>
+          </div>
+        </div>
+        <span class="hint">Save it now. Kilovolt masks it by default and does not provide a recovery flow in evaluation mode.</span>
+      </div>
+
+      <div class="notice"><strong>Environment variable:</strong> copy the gateway key above, then set <code>export KILOVOLT_API_KEY="kvlt_..."</code> in your backend environment.</div>
+
+      <div class="tabs" role="tablist" aria-label="Integration language">
+        <button class="tab active" type="button" role="tab" aria-selected="true" aria-controls="python-panel" data-tab="python-panel">Python</button>
+        <button class="tab" type="button" role="tab" aria-selected="false" aria-controls="typescript-panel" data-tab="typescript-panel">TypeScript</button>
+        <button class="tab" type="button" role="tab" aria-selected="false" aria-controls="curl-panel" data-tab="curl-panel">curl</button>
+      </div>
+
+      <div id="python-panel" class="code-panel" role="tabpanel">
+<pre><code>import os
+from openai import OpenAI
+
+client = OpenAI(
+    api_key=os.environ["KILOVOLT_API_KEY"],
+    base_url="http://127.0.0.1:8080/v1",
+)
+
+response = client.chat.completions.create(
+    model="gpt-4o-mini",
+    messages=[{"role": "user", "content": "Hello"}],
+    max_completion_tokens=100,
+    extra_headers={"X-User-ID": authenticated_user_id},
+)</code></pre>
+      </div>
+
+      <div id="typescript-panel" class="code-panel" role="tabpanel" hidden>
+<pre><code>import OpenAI from "openai";
+
+const client = new OpenAI({
+  apiKey: process.env.KILOVOLT_API_KEY,
+  baseURL: "http://127.0.0.1:8080/v1",
+});
+
+await client.chat.completions.create(
+  {
+    model: "gpt-4o-mini",
+    messages: [{ role: "user", content: "Hello" }],
+    max_completion_tokens: 100,
+  },
+  { headers: { "X-User-ID": authenticatedUserId } },
+);</code></pre>
+      </div>
+
+      <div id="curl-panel" class="code-panel" role="tabpanel" hidden>
+<pre><code>curl http://127.0.0.1:8080/v1/chat/completions \
+  -H "Authorization: Bearer $KILOVOLT_API_KEY" \
+  -H "Content-Type: application/json" \
+  -H "X-User-ID: user-123" \
+  -d '{"model":"gpt-4o-mini","messages":[{"role":"user","content":"Hello"}]}'</code></pre>
+      </div>
+
+      <details class="eval-notice trusted-note">
+        <summary><strong>Security note:</strong> <code>X-User-ID</code> must be set by your trusted backend. Learn why</summary>
+        <p><code>X-User-ID</code> is accounting identity, not authentication. A trusted backend must set or overwrite it after authenticating the user; browsers and mobile clients must not choose arbitrary identities.</p>
+      </details>
+
+      <div class="button-row">
+        <a class="button" href="/dashboard">Open dashboard</a>
+        <a class="button secondary" href="https://github.com/ytp101/kilovolt/tree/main/docs" target="_blank" rel="noopener noreferrer">Read documentation</a>
+      </div>
+    </section>
+  </main>
+
+  <div id="copy-toast" class="toast" role="status" hidden>Gateway key copied</div>
+
+  <script>
+    const secret = document.getElementById('gateway-secret');
+    const gatewayKey = secret.dataset.key;
+    const maskedGatewayKey = document.getElementById('gateway-display').textContent;
+    const verifyAction = document.getElementById('verify-action');
+    const successPanel = document.getElementById('test-success');
+    const failurePanel = document.getElementById('test-failure');
+    const testButton = document.getElementById('test-request-button');
+    const runAgainButton = document.getElementById('run-again-button');
+    const tryAgainButton = document.getElementById('try-again-button');
+
+    function trimNumber(value, maximumDigits = 7) {
+      return Number(value).toFixed(maximumDigits).replace(/0+$/, '').replace(/\.$/, '');
+    }
+
+    function formatSpend(value) {
+      const numeric = Number(value);
+      if (!Number.isFinite(numeric) || numeric === 0) return '$0';
+      return `$${trimNumber(numeric, numeric < 0.0001 ? 7 : 5)}`;
+    }
+
+    function formatLatency(milliseconds) {
+      return milliseconds >= 1000 ? `${trimNumber(milliseconds / 1000, 2)} s` : `${milliseconds} ms`;
+    }
+
+    async function sendTestRequest() {
+      const activeButton = testButton && !testButton.hidden ? testButton : (failurePanel.hidden ? runAgainButton : tryAgainButton);
+      [testButton, runAgainButton, tryAgainButton].filter(Boolean).forEach(button => button.disabled = true);
+      if (activeButton) activeButton.textContent = 'Sending request…';
+      failurePanel.hidden = true;
+
+      try {
+        const response = await fetch('/evaluation/test', {
+          method: 'POST',
+          headers: { 'X-Kilovolt-Evaluation-Key': gatewayKey },
+        });
+        const result = await response.json();
+        if (!result.ok) throw new Error(result.message || `Request failed with HTTP ${response.status}`);
+
+        document.getElementById('result-model').textContent = result.model;
+        document.getElementById('result-tokens').textContent = Number(result.tokens).toLocaleString();
+        document.getElementById('result-spend').textContent = formatSpend(result.spend_usd);
+        document.getElementById('result-latency').textContent = formatLatency(result.latency_ms);
+        verifyAction.hidden = true;
+        successPanel.hidden = false;
+      } catch (error) {
+        successPanel.hidden = true;
+        verifyAction.hidden = true;
+        document.getElementById('failure-message').textContent = error.message || 'Kilovolt could not complete the request. Check the provider connection and try again.';
+        failurePanel.hidden = false;
+      } finally {
+        [testButton, runAgainButton, tryAgainButton].filter(Boolean).forEach(button => button.disabled = false);
+        if (testButton) testButton.textContent = 'Send test request';
+        runAgainButton.textContent = 'Run again';
+        tryAgainButton.textContent = 'Try again';
+      }
+    }
+
+    testButton?.addEventListener('click', sendTestRequest);
+    runAgainButton.addEventListener('click', sendTestRequest);
+    tryAgainButton.addEventListener('click', sendTestRequest);
+
+    document.getElementById('connect-button').addEventListener('click', () => {
+      document.getElementById('verify-progress').className = 'complete';
+      document.getElementById('verify-progress').textContent = '2. Verify ✓';
+      document.getElementById('verify-progress').removeAttribute('aria-current');
+      document.getElementById('connect-progress').className = 'active';
+      document.getElementById('connect-progress').setAttribute('aria-current', 'step');
+      document.getElementById('connect-stage').hidden = false;
+      document.getElementById('connect-heading').focus({ preventScroll: true });
+      document.getElementById('connect-stage').scrollIntoView({ behavior: 'smooth', block: 'start' });
+    });
+
+    document.getElementById('reveal-key-button').addEventListener('click', event => {
+      const revealing = event.currentTarget.getAttribute('aria-pressed') !== 'true';
+      document.getElementById('gateway-display').textContent = revealing ? gatewayKey : maskedGatewayKey;
+      event.currentTarget.textContent = revealing ? 'Hide' : 'Reveal';
+      event.currentTarget.setAttribute('aria-pressed', String(revealing));
+    });
+
+    document.getElementById('copy-key-button').addEventListener('click', async () => {
+      await navigator.clipboard.writeText(gatewayKey);
+      const toast = document.getElementById('copy-toast');
+      toast.hidden = false;
+      window.setTimeout(() => { toast.hidden = true; }, 1800);
+    });
+
+    document.querySelectorAll('[data-tab]').forEach(tab => {
+      tab.addEventListener('click', () => {
+        document.querySelectorAll('[data-tab]').forEach(candidate => {
+          const selected = candidate === tab;
+          candidate.classList.toggle('active', selected);
+          candidate.setAttribute('aria-selected', String(selected));
+          document.getElementById(candidate.dataset.tab).hidden = !selected;
+        });
+      });
+    });
+  </script>
+</body>
+</html>

@@ -1,0 +1,187 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <link rel="icon" href="data:,">
+  <title>Dashboard · Kilovolt</title>
+  <style>{{APP_CSS}}</style>
+</head>
+<body>
+  <header class="app-header">
+    <nav class="shell nav" aria-label="Primary navigation">
+      <a class="brand" href="{{BRAND_HREF}}">⚡ Kilovolt</a>
+      <div class="nav-links">
+        {{GETTING_STARTED_NAV}}
+        <a class="active" href="/dashboard" aria-current="page">Dashboard</a>
+        <a href="https://github.com/ytp101/kilovolt/tree/main/docs" target="_blank" rel="noopener noreferrer">Documentation</a>
+      </div>
+    </nav>
+  </header>
+
+  <main class="shell main-content">
+    {{MONITOR_PROGRESS}}
+    <div class="dashboard-heading">
+      <div>
+        <h1>Monitor spending</h1>
+        <p class="muted" style="margin-bottom: 0;">Project and user budget activity for this Kilovolt process.</p>
+      </div>
+      <div class="live-status"><span id="status-dot" class="status-dot"></span><span id="status-text">Live</span></div>
+    </div>
+
+    <section class="metric-grid" aria-label="Budget summary">
+      <div class="metric-card">
+        <span class="metric-label">Project spend</span>
+        <strong id="project-budget-summary" class="metric-value">—</strong>
+        <span class="metric-note">Shared by all users</span>
+      </div>
+      <div class="metric-card">
+        <span class="metric-label">Default user limit</span>
+        <strong id="default-budget" class="metric-value">—</strong>
+        <span class="metric-note">Default USD limit</span>
+      </div>
+      <div class="metric-card">
+        <span class="metric-label">Accepted</span>
+        <strong id="recent-accepted" class="metric-value success">—</strong>
+        <span class="metric-note">Recent transactions</span>
+      </div>
+      <div class="metric-card">
+        <span class="metric-label">Blocked</span>
+        <strong id="recent-blocked" class="metric-value danger">—</strong>
+        <span class="metric-note">Budget rejections</span>
+      </div>
+    </section>
+
+    <section class="panel" aria-labelledby="users-heading">
+      <div class="panel-header">
+        <h2 id="users-heading">Active users</h2>
+        <span id="active-user-count" class="badge">0 users</span>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>User</th><th class="numeric">Spend</th><th class="numeric">Limit</th><th>Status</th></tr></thead>
+          <tbody id="users-table"><tr><td colspan="4" class="empty">No active users yet.</td></tr></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="panel" aria-labelledby="transactions-heading">
+      <div class="panel-header">
+        <h2 id="transactions-heading">Recent transactions</h2>
+        <span id="total-tokens" class="badge">0 tokens</span>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Time</th><th>User</th><th>Model</th><th class="numeric">Tokens</th><th class="numeric">Spend</th><th>Result</th><th class="numeric">Latency</th></tr></thead>
+          <tbody id="transactions-table"><tr><td colspan="7" class="empty">Waiting for traffic…</td></tr></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="panel" aria-labelledby="health-heading">
+      <div class="panel-header"><h2 id="health-heading">System health</h2><span class="badge">Process metrics</span></div>
+      <div class="health-grid">
+        <div class="health-item"><span>Uptime</span><strong id="uptime">—</strong></div>
+        <div class="health-item"><span>Memory RSS</span><strong id="memory">—</strong></div>
+        <div class="health-item"><span>Average latency</span><strong id="latency">—</strong></div>
+      </div>
+    </section>
+
+    <p class="limitations">Evaluation limitations: one process owns one in-memory budget domain; restart resets setup and spend; multiple replicas do not coordinate. Calculated spend estimates provider billing, pricing may become stale, and <code>X-User-ID</code> is accounting identity—not authentication.</p>
+  </main>
+
+  <script>
+    function trimNumber(value, maximumDigits = 7) {
+      return Number(value).toFixed(maximumDigits).replace(/0+$/, '').replace(/\.$/, '');
+    }
+
+    function formatSpend(value) {
+      const numeric = Number(value);
+      if (!Number.isFinite(numeric) || numeric === 0) return '$0';
+      return `$${trimNumber(numeric, numeric < 0.0001 ? 7 : 5)}`;
+    }
+
+    function formatBudget(value) { return `$${Number(value).toFixed(2)}`; }
+
+    function formatLatency(milliseconds, average = false) {
+      const value = milliseconds >= 1000 ? `${trimNumber(milliseconds / 1000, 2)} s` : `${trimNumber(milliseconds, 2)} ms`;
+      return average ? `${value} average latency` : value;
+    }
+
+    function formatUptime(seconds) {
+      const hours = Math.floor(seconds / 3600);
+      const minutes = Math.floor((seconds % 3600) / 60);
+      const remaining = seconds % 60;
+      return `${hours}h ${minutes}m ${remaining}s`;
+    }
+
+    function escapeHtml(value) {
+      return String(value)
+        .replaceAll('&', '&amp;')
+        .replaceAll('<', '&lt;')
+        .replaceAll('>', '&gt;')
+        .replaceAll('"', '&quot;')
+        .replaceAll("'", '&#039;');
+    }
+
+    async function fetchStats() {
+      try {
+        const response = await fetch('/api/stats', { cache: 'no-store' });
+        if (!response.ok) throw new Error(`Stats returned HTTP ${response.status}`);
+        const data = await response.json();
+        const budget = data.budget;
+
+        document.getElementById('project-budget-summary').textContent = `${formatSpend(budget.current_project_spend_usd)} spent of ${formatBudget(budget.project_budget_usd)}`;
+        document.getElementById('default-budget').textContent = `${formatBudget(budget.default_budget_usd)} per user`;
+        document.getElementById('recent-accepted').textContent = budget.recent_accepted_requests.toLocaleString();
+        document.getElementById('recent-blocked').textContent = budget.recent_blocked_requests.toLocaleString();
+        document.getElementById('total-tokens').textContent = `${budget.total_tokens_consumed.toLocaleString()} tokens`;
+
+        const users = Object.entries(budget.current_spend_by_user).sort(([left], [right]) => left.localeCompare(right));
+        document.getElementById('active-user-count').textContent = `${users.length.toLocaleString()} ${users.length === 1 ? 'user' : 'users'}`;
+        document.getElementById('users-table').innerHTML = users.length === 0
+          ? '<tr><td colspan="4" class="empty">No active users yet.</td></tr>'
+          : users.map(([user, spend]) => {
+              const blocked = spend >= budget.default_budget_usd;
+              return `<tr>
+                <td><strong style="color: var(--text)">${escapeHtml(user)}</strong></td>
+                <td class="numeric mono">${formatSpend(spend)}</td>
+                <td class="numeric mono">${formatBudget(budget.default_budget_usd)}</td>
+                <td><span class="badge ${blocked ? 'danger' : 'success'}">${blocked ? 'At limit' : 'Active'}</span></td>
+              </tr>`;
+            }).join('');
+
+        const requests = budget.recent_requests;
+        document.getElementById('transactions-table').innerHTML = requests.length === 0
+          ? '<tr><td colspan="7" class="empty">Waiting for traffic…</td></tr>'
+          : requests.map(request => {
+              const accepted = request.status < 400;
+              const blocked = request.status === 429;
+              const result = accepted ? 'Accepted' : (blocked ? 'Blocked' : 'Failed');
+              return `<tr>
+                <td class="mono">${escapeHtml(request.timestamp)}</td>
+                <td><strong style="color: var(--text)">${escapeHtml(request.user_id)}</strong></td>
+                <td>${escapeHtml(request.model)}</td>
+                <td class="numeric mono">${request.tokens.toLocaleString()}</td>
+                <td class="numeric mono">${formatSpend(request.cost)}</td>
+                <td><span class="badge ${accepted ? 'success' : 'danger'}">${result}</span> <span class="faint small">HTTP ${request.status}</span></td>
+                <td class="numeric mono">${formatLatency(request.duration_ms)}</td>
+              </tr>`;
+            }).join('');
+
+        document.getElementById('uptime').textContent = formatUptime(data.health.uptime_seconds);
+        document.getElementById('memory').textContent = `${trimNumber(data.health.memory_usage_kb / 1024, 2)} MB`;
+        document.getElementById('latency').textContent = formatLatency(data.health.avg_latency_ms, true);
+        document.getElementById('status-dot').className = 'status-dot';
+        document.getElementById('status-text').textContent = 'Live';
+      } catch (error) {
+        document.getElementById('status-dot').className = 'status-dot offline';
+        document.getElementById('status-text').textContent = 'Disconnected';
+      }
+    }
+
+    fetchStats();
+    window.setInterval(fetchStats, 3000);
+  </script>
+</body>
+</html>

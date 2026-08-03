@@ -166,7 +166,7 @@ status="$(curl --silent --show-error --output "${tmp_dir}/dashboard" --write-out
   --user "kilovolt:${dashboard_token}" \
   "${base_url}/dashboard")"
 require_status "${status}" 200 "dashboard" "${tmp_dir}/dashboard"
-grep -Fq '<title>Kilovolt Dashboard' "${tmp_dir}/dashboard" || fail "dashboard HTML was not returned"
+grep -Fq 'Monitor spending' "${tmp_dir}/dashboard" || fail "dashboard HTML was not returned"
 pass "authenticated dashboard loads"
 
 printf '\nKilovolt demo smoke passed: health, authentication, pricing, identity, budgets, streaming, stats, and dashboard.\n'
