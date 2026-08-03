@@ -21,6 +21,170 @@ jobs:
       - run: cargo clippy --all-targets --all-features -- -D warnings
       - run: cargo test --all-targets --all-features
       - run: cargo build --release
+      - name: Verify the demo smoke test fails when Kilovolt is unavailable
+        run: |
+          cleanup_probe="$(mktemp -d)"
+          cleanup() {
+            rmdir "${cleanup_probe}" 2>/dev/null || true
+          }
+          trap cleanup EXIT
+
+          if KILOVOLT_DEMO_TMP_PARENT="${cleanup_probe}" \
+            KILOVOLT_DEMO_BASE_URL=http://127.0.0.1:18081 \
+            KILOVOLT_DEMO_HEALTH_ATTEMPTS=1 \
+            scripts/demo-smoke.sh; then
+            echo "demo smoke unexpectedly passed without a service" >&2
+            exit 1
+          fi
+          if [[ -n "$(find "${cleanup_probe}" -mindepth 1 -print -quit)" ]]; then
+            echo "demo smoke left temporary state after failure" >&2
+            exit 1
+          fi
+      - name: Verify invalid startup configuration fails cleanly
+        run: |
+          if invalid_output="$(KILOVOLT_PROJECT_BUDGET=not-a-budget \
+            target/release/kilovolt 2>&1)"; then
+            printf '%s\n' "${invalid_output}" >&2
+            echo "Kilovolt unexpectedly started with an invalid project budget" >&2
+            exit 1
+          fi
+          grep -Fq 'KILOVOLT_PROJECT_BUDGET' <<<"${invalid_output}"
+
+          if invalid_output="$(KILOVOLT_TELEMETRY_ENABLED=true \
+            KILOVOLT_TELEMETRY_URL=not-an-http-url \
+            target/release/kilovolt 2>&1)"; then
+            printf '%s\n' "${invalid_output}" >&2
+            echo "Kilovolt unexpectedly started with an invalid active telemetry URL" >&2
+            exit 1
+          fi
+          grep -Fq 'KILOVOLT_TELEMETRY_URL' <<<"${invalid_output}"
+      - name: Run one-command browser evaluation journey
+        run: |
+          image='yodsarun/kilovolt-proxy:latest'
+          provider_key='sk-ci-provider-secret-ABCD'
+          log_file="$(mktemp)"
+          setup_file="$(mktemp)"
+          stats_file="$(mktemp)"
+          docker_pid=''
+
+          cleanup() {
+            container_id="$(docker ps -aq --filter "ancestor=${image}" | head -n 1)"
+            if [[ -n "${container_id}" ]]; then
+              docker stop "${container_id}" >/dev/null 2>&1 || true
+              docker rm "${container_id}" >/dev/null 2>&1 || true
+            fi
+            if [[ -n "${docker_pid}" ]]; then
+              wait "${docker_pid}" 2>/dev/null || true
+            fi
+            rm -f "${log_file}" "${setup_file}" "${stats_file}"
+          }
+          trap cleanup EXIT
+
+          docker build -t "${image}" .
+          t0="$(date +%s%3N)"
+          docker run -p 127.0.0.1:8080:8080 yodsarun/kilovolt-proxy:latest >"${log_file}" 2>&1 &
+          docker_pid="$!"
+
+          for _ in $(seq 1 60); do
+            if curl --silent --fail http://127.0.0.1:8080/ >"${setup_file}"; then
+              break
+            fi
+            sleep 1
+          done
+          t1="$(date +%s%3N)"
+          grep -Fq 'Continue to verification' "${setup_file}"
+          test "$(curl --fail --silent http://127.0.0.1:8080/health)" = 'OK'
+          grep -Fxq 'Kilovolt is ready.' "${log_file}"
+          grep -Fxq 'http://127.0.0.1:8080' "${log_file}"
+          grep -Fxq 'Evaluation mode: configuration and calculated spend are temporary.' "${log_file}"
+
+          test "$(curl --silent --output /dev/null --write-out '%{http_code}' \
+            --data-urlencode 'provider_api_key=' \
+            --data-urlencode 'project_budget=10' \
+            --data-urlencode 'default_budget=1' \
+            http://127.0.0.1:8080/setup)" = '422'
+          test "$(curl --silent --output /dev/null --write-out '%{http_code}' \
+            --data-urlencode "provider_api_key=${provider_key}" \
+            --data-urlencode 'project_budget=not-a-number' \
+            --data-urlencode 'default_budget=1' \
+            http://127.0.0.1:8080/setup)" = '422'
+
+          curl --silent --fail \
+            --data-urlencode "provider_api_key=${provider_key}" \
+            --data-urlencode 'project_budget=10' \
+            --data-urlencode 'default_budget=1' \
+            http://127.0.0.1:8080/setup >"${setup_file}"
+          t2="$(date +%s%3N)"
+          ! grep -Fq "${provider_key}" "${setup_file}"
+          grep -Fq '••••ABCD' "${setup_file}"
+          gateway_key="$(grep -Eo 'kvlt_[0-9a-f]{64}' "${setup_file}" | head -n 1)"
+          test "${#gateway_key}" = '69'
+
+          test "$(curl --silent --output /dev/null --write-out '%{http_code}' \
+            --data-urlencode 'provider_api_key=sk-replacement' \
+            --data-urlencode 'project_budget=20' \
+            --data-urlencode 'default_budget=2' \
+            http://127.0.0.1:8080/setup)" = '404'
+
+          test "$(curl --silent --output /tmp/invalid-gateway.json --write-out '%{http_code}' \
+            -H 'Authorization: Bearer wrong-gateway' \
+            -H 'X-User-ID: ci-user' \
+            -H 'Content-Type: application/json' \
+            --data '{"model":"unpriced-ci-model","messages":[{"role":"user","content":"test"}],"max_completion_tokens":1}' \
+            http://127.0.0.1:8080/v1/chat/completions)" = '401'
+          grep -Fq 'kilovolt_gateway_auth_failed' /tmp/invalid-gateway.json
+
+          test "$(curl --silent --output /tmp/valid-gateway.json --write-out '%{http_code}' \
+            -H "Authorization: Bearer ${gateway_key}" \
+            -H 'X-User-ID: ci-user' \
+            -H 'Content-Type: application/json' \
+            --data '{"model":"unpriced-ci-model","messages":[{"role":"user","content":"test"}],"max_completion_tokens":1}' \
+            http://127.0.0.1:8080/v1/chat/completions)" = '400'
+          grep -Fq 'model_pricing_not_configured' /tmp/valid-gateway.json
+
+          curl --silent --fail http://127.0.0.1:8080/api/stats >"${stats_file}"
+          grep -Fq '"project_budget_usd":10.0' "${stats_file}"
+          ! grep -Fq "${provider_key}" "${log_file}"
+          ! grep -Fq "${provider_key}" "${setup_file}"
+          ! grep -Fq "${provider_key}" "${stats_file}"
+
+          printf 'T0->T1 dashboard reachable: %sms\n' "$((t1 - t0))"
+          printf 'T1->T2 setup complete: %sms\n' "$((t2 - t1))"
+
+          container_id="$(docker ps -q --filter "ancestor=${image}" | head -n 1)"
+          docker stop "${container_id}"
+          wait "${docker_pid}" || true
+          docker rm "${container_id}"
+          docker_pid=''
+
+          : >"${log_file}"
+          docker run -p 127.0.0.1:8080:8080 yodsarun/kilovolt-proxy:latest >"${log_file}" 2>&1 &
+          docker_pid="$!"
+          for _ in $(seq 1 60); do
+            if curl --silent --fail http://127.0.0.1:8080/ >"${setup_file}"; then
+              break
+            fi
+            sleep 1
+          done
+          grep -Fq 'Continue to verification' "${setup_file}"
+          rm -f /tmp/invalid-gateway.json /tmp/valid-gateway.json
+      - name: Run provider-free demo Compose journey
+        run: |
+          cleanup() {
+            docker compose -f docker-compose.demo.yml down --remove-orphans >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+
+          docker compose -f docker-compose.demo.yml config --quiet
+          docker compose -f docker-compose.demo.yml up -d --build
+
+          if ! ./scripts/demo-smoke.sh; then
+            docker compose -f docker-compose.demo.yml ps --all >&2 || true
+            docker compose -f docker-compose.demo.yml logs --no-color >&2 || true
+            exit 1
+          fi
+          docker compose -f docker-compose.demo.yml down --remove-orphans
+          trap - EXIT
       - run: python3 scripts/check-docs.py
       - run: scripts/smoke-cookbook.sh
       - run: python3 scripts/telemetry-smoke.py

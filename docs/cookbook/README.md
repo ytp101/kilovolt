@@ -5,6 +5,9 @@
 Use verified Kilovolt configurations and request shapes without relying on
 marketing claims.
 
+For a provider-free first run, start with the
+[15-minute design-partner evaluation](../quickstart.md).
+
 ## Request flow
 
 ```text

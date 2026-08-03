@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <link rel="icon" href="data:,">
+  <title>Set up Kilovolt</title>
+  <style>{{APP_CSS}}</style>
+</head>
+<body>
+  <main class="page-center">
+    <section class="setup-shell card setup-card" aria-labelledby="setup-heading">
+      <div class="brand">⚡ Set up Kilovolt</div>
+      <ol class="progress" aria-label="Setup progress">
+        <li class="active" aria-current="step">1. Configure</li>
+        <li>2. Verify</li>
+        <li>3. Connect</li>
+      </ol>
+
+      <h1 id="setup-heading">Connect your OpenAI account</h1>
+      <p class="lead">Add your OpenAI API key. Kilovolt will generate a separate gateway key for your backend.</p>
+      {{SETUP_ERROR}}
+
+      <form action="/setup" method="post" autocomplete="off">
+        <label class="field-label" for="provider-api-key">OpenAI API key</label>
+        <a class="key-link" href="https://platform.openai.com/api-keys" target="_blank" rel="noopener noreferrer">Create or manage an OpenAI API key ↗</a>
+        <div class="input-row">
+          <input id="provider-api-key" name="provider_api_key" type="password" placeholder="sk-..." required autofocus spellcheck="false" autocomplete="off">
+          <button id="toggle-provider-key" class="input-action" type="button" aria-controls="provider-api-key" aria-pressed="false">Show</button>
+        </div>
+        <span class="hint">Stored only in this running Kilovolt process and used only for upstream requests.</span>
+
+        <details class="secondary-options">
+          <summary>
+            <span class="summary-title">
+              <strong>Customize spending limits</strong>
+              <span>Optional — evaluation defaults are already set</span>
+            </span>
+          </summary>
+          <div class="details-body">
+            <p class="small muted" style="margin: 14px 0 0;">Kilovolt calculates estimated provider spend in USD.</p>
+            <label class="field-label" for="project-budget">Project limit</label>
+            <input id="project-budget" name="project_budget" type="number" value="10.00" min="0" step="0.01" required inputmode="decimal">
+            <span class="hint">Shared USD limit across every user in this Kilovolt deployment.</span>
+
+            <label class="field-label" for="default-budget">Default per-user limit</label>
+            <input id="default-budget" name="default_budget" type="number" value="1.00" min="0" step="0.01" required inputmode="decimal">
+            <span class="hint"><code>X-User-ID</code> identifies each user's USD limit. Insert it only from your authenticated, trusted backend.</span>
+          </div>
+        </details>
+
+        <button class="button block" type="submit">Continue to verification</button>
+      </form>
+
+      <details class="eval-notice">
+        <summary>Evaluation mode · Setup and spend reset when Kilovolt restarts. Learn more</summary>
+        <p>This quick start stores configuration and calculated spend only in this process. It is intended for a local evaluation, not production deployment.</p>
+      </details>
+    </section>
+  </main>
+  <script>
+    const keyInput = document.getElementById('provider-api-key');
+    const toggle = document.getElementById('toggle-provider-key');
+    toggle.addEventListener('click', () => {
+      const showing = keyInput.type === 'text';
+      keyInput.type = showing ? 'password' : 'text';
+      toggle.textContent = showing ? 'Show' : 'Hide';
+      toggle.setAttribute('aria-pressed', String(!showing));
+    });
+  </script>
+</body>
+</html>

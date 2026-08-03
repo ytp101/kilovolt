@@ -19,9 +19,12 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 use crate::config::{
     AppState, DEFAULT_MAX_REQUEST_BODY_BYTES, DEFAULT_MAX_SSE_FRAME_BYTES,
-    DEFAULT_MAX_UPSTREAM_BODY_BYTES, DEFAULT_TELEMETRY_URL, TelemetryConfig,
+    DEFAULT_MAX_UPSTREAM_BODY_BYTES, DEFAULT_TELEMETRY_URL, EvaluationSetupState, TelemetryConfig,
 };
-use crate::dashboard::{get_dashboard, get_stats};
+use crate::dashboard::{
+    get_dashboard, get_documentation, get_root, get_stats, post_evaluation_budgets,
+    post_evaluation_test, post_setup,
+};
 use crate::ledger::BudgetLedger;
 use crate::pricing::PricingRegistry;
 use crate::proxy::{chat_completions_proxy, mock_chat_completions};
@@ -29,6 +32,10 @@ use crate::proxy::{chat_completions_proxy, mock_chat_completions};
 /// Simple health check probe.
 async fn health_check() -> &'static str {
     "OK"
+}
+
+fn is_docker_environment() -> bool {
+    std::path::Path::new("/.dockerenv").exists()
 }
 
 /// Helper function to retrieve or generate a persistent anonymous client hash.
@@ -84,7 +91,7 @@ async fn send_startup_telemetry(
         telemetry_endpoint
     );
 
-    let is_docker = std::path::Path::new("/.dockerenv").exists();
+    let is_docker = is_docker_environment();
 
     let payload = startup_telemetry_payload(&client_hash, current_version, is_docker, &os, &arch);
 
@@ -269,6 +276,39 @@ fn parse_optional_positive_size(
     }
 }
 
+fn parse_budget_limit(raw: Option<&str>, default: f64, variable: &str) -> Result<f64, String> {
+    let Some(raw) = raw else {
+        return Ok(default);
+    };
+    let value = raw
+        .trim()
+        .parse::<f64>()
+        .map_err(|_| format!("{variable} must be a finite non-negative USD amount"))?;
+    if !value.is_finite() || value < 0.0 {
+        return Err(format!(
+            "{variable} must be a finite non-negative USD amount"
+        ));
+    }
+    Ok(value)
+}
+
+fn validate_http_url(raw: &str, variable: &str) -> Result<(), String> {
+    let url = reqwest::Url::parse(raw)
+        .map_err(|error| format!("{variable} must be an absolute HTTP(S) URL: {error}"))?;
+    if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
+        return Err(format!("{variable} must be an absolute HTTP(S) URL"));
+    }
+    Ok(())
+}
+
+fn validate_http_url_when_enabled(enabled: bool, raw: &str, variable: &str) -> Result<(), String> {
+    if enabled {
+        validate_http_url(raw, variable)
+    } else {
+        Ok(())
+    }
+}
+
 fn parse_strict_bool(raw: Option<&str>, variable: &str) -> Result<bool, String> {
     match raw.map(str::trim).map(str::to_ascii_lowercase).as_deref() {
         None | Some("0" | "false" | "no" | "off") => Ok(false),
@@ -368,6 +408,7 @@ async fn main() {
     info!("Starting Kilovolt (kvlt) gateway engine...");
 
     // Extract dynamic environment variables with safe production fallbacks
+    let docker_environment = is_docker_environment();
     let port = std::env::var("KILOVOLT_PORT")
         .ok()
         .and_then(|s| s.parse::<u16>().ok())
@@ -375,18 +416,30 @@ async fn main() {
     let bind = std::env::var("BIND_ADDR")
         .ok()
         .or_else(|| std::env::var("HOST").ok())
-        .unwrap_or_else(|| "127.0.0.1".to_string());
+        .unwrap_or_else(|| {
+            if docker_environment {
+                "0.0.0.0".to_string()
+            } else {
+                "127.0.0.1".to_string()
+            }
+        });
     let addr = bind_address(&bind, port);
 
-    let default_budget = std::env::var("KILOVOLT_DEFAULT_BUDGET")
-        .ok()
-        .and_then(|s| s.parse::<f64>().ok())
-        .unwrap_or(1.00);
+    let default_budget_raw = std::env::var("KILOVOLT_DEFAULT_BUDGET").ok();
+    let default_budget = parse_budget_limit(
+        default_budget_raw.as_deref(),
+        1.00,
+        "KILOVOLT_DEFAULT_BUDGET",
+    )
+    .unwrap_or_else(|message| fatal_configuration(&message));
 
-    let project_budget = std::env::var("KILOVOLT_PROJECT_BUDGET")
-        .ok()
-        .and_then(|s| s.parse::<f64>().ok())
-        .unwrap_or(default_budget);
+    let project_budget_raw = std::env::var("KILOVOLT_PROJECT_BUDGET").ok();
+    let project_budget = parse_budget_limit(
+        project_budget_raw.as_deref(),
+        default_budget,
+        "KILOVOLT_PROJECT_BUDGET",
+    )
+    .unwrap_or_else(|message| fatal_configuration(&message));
 
     let per_step_tokens = std::env::var("KILOVOLT_PER_STEP_TOKENS")
         .ok()
@@ -485,13 +538,26 @@ async fn main() {
         "KILOVOLT_ENABLE_MOCK_UPSTREAM",
     )
     .unwrap_or_else(|message| fatal_configuration(&message));
-    validate_deployment_safety(
-        &bind,
-        acknowledge_process_local_ledger,
-        proxy_token.is_some(),
-        allow_unauthenticated_public_proxy,
-    )
-    .unwrap_or_else(|message| fatal_configuration(&message));
+    if mock_upstream_enabled {
+        warn!("Embedded mock upstream enabled for local evaluation; do not use it in production");
+    }
+    let browser_setup_mode = docker_environment
+        && proxy_token.is_none()
+        && !allow_unauthenticated_public_proxy
+        && !mock_upstream_enabled;
+    if browser_setup_mode {
+        warn!(
+            "Evaluation setup mode enabled: only localhost host publishing is supported; setup and spend reset when the process restarts"
+        );
+    } else {
+        validate_deployment_safety(
+            &bind,
+            acknowledge_process_local_ledger,
+            proxy_token.is_some(),
+            allow_unauthenticated_public_proxy,
+        )
+        .unwrap_or_else(|message| fatal_configuration(&message));
+    }
 
     let pricing_file = std::env::var("KILOVOLT_PRICING_FILE").ok();
     let pricing_registry = PricingRegistry::load(pricing_file.as_deref().map(std::path::Path::new))
@@ -501,7 +567,7 @@ async fn main() {
         .ok()
         .filter(|token| !token.is_empty())
         .map(Arc::<str>::from);
-    if dashboard_token.is_none() {
+    if dashboard_token.is_none() && !browser_setup_mode {
         warn!("Customer dashboard disabled: set KILOVOLT_DASHBOARD_TOKEN and restart to enable it");
     }
 
@@ -509,13 +575,22 @@ async fn main() {
         std::env::var("KILOVOLT_TELEMETRY_ENABLED").ok().as_deref(),
         false,
     );
+    let telemetry_endpoint = std::env::var("KILOVOLT_TELEMETRY_URL")
+        .unwrap_or_else(|_| DEFAULT_TELEMETRY_URL.to_string());
+    validate_http_url_when_enabled(
+        telemetry_enabled,
+        &telemetry_endpoint,
+        "KILOVOLT_TELEMETRY_URL",
+    )
+    .unwrap_or_else(|message| fatal_configuration(&message));
     let telemetry = TelemetryConfig {
         enabled: telemetry_enabled,
-        endpoint: std::env::var("KILOVOLT_TELEMETRY_URL")
-            .unwrap_or_else(|_| DEFAULT_TELEMETRY_URL.to_string()),
+        endpoint: telemetry_endpoint,
     };
     let openai_upstream_url = std::env::var("KILOVOLT_OPENAI_UPSTREAM_URL")
         .unwrap_or_else(|_| "https://api.openai.com/v1/chat/completions".to_string());
+    validate_http_url(&openai_upstream_url, "KILOVOLT_OPENAI_UPSTREAM_URL")
+        .unwrap_or_else(|message| fatal_configuration(&message));
     let upstream_header_timeout_seconds = parse_positive_size(
         std::env::var("KILOVOLT_UPSTREAM_HEADER_TIMEOUT_SECONDS")
             .ok()
@@ -539,6 +614,7 @@ async fn main() {
         mock_upstream_enabled = %mock_upstream_enabled,
         process_local_ledger_acknowledged = %acknowledge_process_local_ledger,
         allow_unauthenticated_public_proxy = %allow_unauthenticated_public_proxy,
+        browser_setup_mode = %browser_setup_mode,
         bind_address = %addr,
         dashboard_enabled = %dashboard_token.is_some(),
         company_telemetry_enabled = %telemetry.enabled,
@@ -583,6 +659,7 @@ async fn main() {
         proxy_token,
         mock_upstream_enabled,
         dashboard_token,
+        evaluation_setup: browser_setup_mode.then(|| Arc::new(EvaluationSetupState::new())),
         telemetry: telemetry.clone(),
         per_step_tokens,
         per_pipeline_tokens,
@@ -615,8 +692,13 @@ async fn main() {
 
     // Build the Axum Router
     let app = Router::new()
+        .route("/", get(get_root))
+        .route("/setup", post(post_setup))
+        .route("/evaluation/test", post(post_evaluation_test))
+        .route("/evaluation/budgets", post(post_evaluation_budgets))
         .route("/health", get(health_check))
         .route("/dashboard", get(get_dashboard))
+        .route("/documentation", get(get_documentation))
         .route("/api/stats", get(get_stats))
         .route("/v1/chat/completions", post(chat_completions_proxy))
         .route("/mock/v1/chat/completions", post(mock_chat_completions))
@@ -630,6 +712,11 @@ async fn main() {
         }
     };
     info!("Kilovolt listening on http://{}", addr);
+    if browser_setup_mode {
+        println!(
+            "Kilovolt is ready.\n\nOpen:\nhttp://127.0.0.1:{port}\n\nEvaluation mode: configuration and calculated spend are temporary."
+        );
+    }
 
     if let Err(e) = axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())
@@ -644,9 +731,10 @@ async fn main() {
 #[cfg(test)]
 mod tests {
     use super::{
-        bind_address, daily_telemetry_payload, is_loopback_bind, parse_bool,
+        bind_address, daily_telemetry_payload, is_loopback_bind, parse_bool, parse_budget_limit,
         parse_optional_positive_size, parse_positive_size, parse_strict_bool,
-        startup_telemetry_payload, validate_deployment_safety,
+        startup_telemetry_payload, validate_deployment_safety, validate_http_url,
+        validate_http_url_when_enabled,
     };
     use std::collections::HashMap;
 
@@ -680,6 +768,48 @@ mod tests {
         assert!(parse_optional_positive_size(Some("0"), "TEST").is_err());
         assert!(parse_strict_bool(Some("invalid"), "TEST").is_err());
         assert!(parse_strict_bool(Some("true"), "TEST").unwrap());
+    }
+
+    #[test]
+    fn financial_limits_must_be_finite_and_non_negative() {
+        assert_eq!(parse_budget_limit(None, 1.0, "TEST").unwrap(), 1.0);
+        assert_eq!(
+            parse_budget_limit(Some(" 0.25 "), 1.0, "TEST").unwrap(),
+            0.25
+        );
+        for invalid in ["", "not-a-number", "-0.01", "NaN", "inf", "-inf"] {
+            assert!(
+                parse_budget_limit(Some(invalid), 1.0, "TEST").is_err(),
+                "{invalid} should fail"
+            );
+        }
+    }
+
+    #[test]
+    fn upstream_url_must_be_absolute_http_or_https() {
+        for valid in [
+            "https://api.openai.com/v1/chat/completions",
+            "http://127.0.0.1:11434/v1/chat/completions",
+        ] {
+            assert!(validate_http_url(valid, "TEST").is_ok(), "{valid}");
+        }
+        for invalid in [
+            "api.openai.com/v1/chat/completions",
+            "/v1/chat/completions",
+            "ftp://example.com/model",
+            "http://",
+        ] {
+            assert!(validate_http_url(invalid, "TEST").is_err(), "{invalid}");
+        }
+    }
+
+    #[test]
+    fn telemetry_url_is_validated_only_when_telemetry_is_enabled() {
+        assert!(validate_http_url_when_enabled(false, "unused-invalid-url", "TEST").is_ok());
+        assert!(validate_http_url_when_enabled(true, "unused-invalid-url", "TEST").is_err());
+        assert!(
+            validate_http_url_when_enabled(true, "https://example.com/telemetry", "TEST").is_ok()
+        );
     }
 
     #[test]

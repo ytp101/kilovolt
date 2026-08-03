@@ -9,7 +9,7 @@ against every provider charge.
 ```text
 Untrusted browser/mobile client
         -> authenticated founder backend
-        -> trusted X-User-ID + X-Kilovolt-Key + provider credential
+        -> trusted X-User-ID + Kilovolt gateway credential
         -> private Kilovolt endpoint
         -> AI provider
 ```
@@ -23,10 +23,10 @@ trusted rather than authenticated by Kilovolt.
 | Threat | Classification | Current control and remaining responsibility |
 |---|---|---|
 | Forged or rotated `X-User-ID` | Operator responsibility | Only an authenticated backend should insert it. Kilovolt does not verify the identity. |
-| Public customer dashboard | Mitigated when configured | `/dashboard` and `/api/stats` require the configured secret through HTTP Basic or bearer auth. Missing configuration disables them. Keep them private and use TLS. |
+| Public customer dashboard | Partially mitigated | Browser evaluation mode has no separate admin login and relies on the documented host-loopback publishing. Configured manual mode requires its dashboard secret. Keep either mode private; use TLS and additional access controls outside localhost. |
 | Weak dashboard token | Operator responsibility | Generate a high-entropy secret, do not put it in URLs, and rotate it by changing the environment and restarting. |
-| Unauthorized proxy use | Mitigated when configured | `KILOVOLT_PROXY_TOKEN` requires a constant-time-checked `X-Kilovolt-Key` before body parsing/reservation. The token is separate from provider and dashboard credentials and is not forwarded to real upstreams. |
-| Stolen upstream API key | Partially mitigated | The key is forwarded in memory and is not included in telemetry. Use environment/secret storage, TLS, scoped keys, log controls, and provider rotation. |
+| Unauthorized proxy use | Mitigated when configured | Browser evaluation mode constant-time-checks its generated gateway key in `Authorization` before body parsing/reservation. Configured manual mode similarly checks `KILOVOLT_PROXY_TOKEN` in `X-Kilovolt-Key`. Neither gateway credential is forwarded to real upstreams. |
+| Stolen upstream API key | Partially mitigated | Evaluation mode stores the key only in process memory, never returns the full key after setup, and substitutes it upstream. Manual mode forwards the application-supplied key. Neither path includes the credential in telemetry. Use scoped keys, log controls, TLS, and provider rotation. |
 | Oversized request body | Mitigated to configured bound | Axum stops reading beyond `KILOVOLT_MAX_REQUEST_BODY_BYTES` and returns structured `413`. |
 | Oversized JSON/error response | Mitigated to configured bound | Buffered upstream bodies are limited by `KILOVOLT_MAX_UPSTREAM_BODY_BYTES`. |
 | Malformed or unterminated SSE | Mitigated to configured bound | Frames are byte-reconstructed, UTF-8/JSON validated, and limited by `KILOVOLT_MAX_SSE_FRAME_BYTES`; malformed data is not forwarded as valid. |
@@ -44,7 +44,7 @@ trusted rather than authenticated by Kilovolt.
 | Public mock route | Mitigated by default | The route and `X-Mock-Upstream` are disabled unless explicitly enabled. Configured proxy authentication also applies to the mock route. |
 | Company telemetry web-admin authentication | Known limitation | The separate `web/` application has its own deployment and authentication design; operators of that component must set `ADMIN_PASSWORD` and review it independently. |
 
-## Dashboard authentication
+## Configured manual dashboard authentication
 
 Set a random value, for example:
 
@@ -53,7 +53,9 @@ openssl rand -hex 32
 export KILOVOLT_DASHBOARD_TOKEN='generated-value'
 ```
 
-Browsers receive an HTTP Basic challenge. Use username `kilovolt` and the token
+Browser evaluation mode instead relies on the localhost-only documented command
+and does not use a separate dashboard login. In configured manual mode, browsers
+receive an HTTP Basic challenge. Use username `kilovolt` and the token
 as the password. Automation may use:
 
 ```bash
@@ -67,7 +69,7 @@ curl -H "Authorization: Bearer ${KILOVOLT_DASHBOARD_TOKEN}" \
 Basic credentials are only encoding, not encryption. Use HTTPS outside a local
 machine and prefer private-network access.
 
-## Proxy authentication
+## Configured manual proxy authentication
 
 ```bash
 export KILOVOLT_PROXY_TOKEN="$(openssl rand -hex 32)"
@@ -80,6 +82,10 @@ requires this token unless
 `KILOVOLT_ALLOW_UNAUTHENTICATED_PUBLIC_PROXY=true` is explicitly set. A reverse
 proxy or private network may provide an external control, but Kilovolt cannot
 verify it, so the unsafe override remains explicit.
+
+Browser evaluation mode generates its distinct high-entropy gateway key during
+setup. The trusted backend sends that value in `Authorization`; Kilovolt validates
+it and replaces it with the in-memory provider key only for upstream delivery.
 
 ## Secret handling checklist
 

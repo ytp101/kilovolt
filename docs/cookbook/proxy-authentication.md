@@ -1,5 +1,9 @@
 # Proxy authentication
 
+This page documents configured manual mode. The one-command browser evaluation
+instead generates a gateway key, accepts it as the SDK bearer key, and substitutes
+the temporarily stored OpenAI key upstream.
+
 ## Goal
 
 Require a gateway credential before Kilovolt reads a proxy body or reserves
@@ -60,7 +64,8 @@ loopback and keep dashboard/proxy/provider secrets distinct.
 
 ## Common failure modes
 
-Using the proxy secret in `Authorization` sends the wrong credential upstream.
+In configured manual mode, using the proxy secret in `Authorization` sends the
+wrong credential upstream.
 A reverse proxy may authenticate externally, but non-loopback Kilovolt still
 requires a token or the explicit unsafe override because it cannot verify that
 external control.

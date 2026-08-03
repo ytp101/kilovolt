@@ -98,12 +98,12 @@ Kilovolt-generated errors use:
 | Status | Meaning |
 |---:|---|
 | `400` | Invalid request, missing output bound, unknown pricing, or unsupported response mode. |
-| `401` | Missing/malformed proxy authorization or dashboard authentication. |
+| `401` | Missing/invalid evaluation gateway key, manual proxy authorization, provider bearer value, or configured dashboard authentication. |
 | `413` | Request body exceeded the configured maximum. |
 | `429` | Token gate, project budget, or user budget rejected the next operation. |
 | `499` | Internal dashboard record for downstream cancellation; not normally an HTTP response. |
 | `502` | Upstream connection/body/protocol/content-type failure. |
-| `503` | Dashboard token is not configured. |
+| `503` | Browser evaluation setup is incomplete, or a configured manual dashboard token is not configured. |
 | `504` | Upstream response headers timed out. |
 
 Non-success upstream statuses and bounded bodies are preserved. They release
@@ -111,8 +111,10 @@ all pre-acceptance reservations.
 
 ## Dashboard routes
 
-`GET /dashboard` and `GET /api/stats` require either browser Basic auth
-(`kilovolt` / `KILOVOLT_DASHBOARD_TOKEN`) or:
+Browser evaluation mode serves `GET /dashboard` and `GET /api/stats` without a
+separate login after setup because the documented port is host-loopback only.
+Configured manual mode requires either browser Basic auth (`kilovolt` /
+`KILOVOLT_DASHBOARD_TOKEN`) or:
 
 ```bash
 curl -H "Authorization: Bearer ${KILOVOLT_DASHBOARD_TOKEN}" \

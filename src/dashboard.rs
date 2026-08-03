@@ -1,15 +1,47 @@
 use crate::config::{AppState, RecentRequest, secrets_match};
+use crate::proxy::chat_completions_proxy;
 use axum::{
-    Json,
+    Form, Json,
+    body::Body,
     extract::State,
-    http::{HeaderMap, StatusCode, header},
+    http::{HeaderMap, HeaderValue, StatusCode, header},
     response::{Html, IntoResponse, Response},
 };
 use base64::{Engine as _, engine::general_purpose::STANDARD};
+use http_body_util::BodyExt;
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
-// Struct for dashboard and stats API payloads
+const APP_CSS: &str = include_str!("ui/app.css");
+const SETUP_HTML: &str = include_str!("ui/setup.html");
+const ONBOARDING_HTML: &str = include_str!("ui/onboarding.html");
+const DASHBOARD_HTML: &str = include_str!("ui/dashboard.html");
+const DOCUMENTATION_HTML: &str = include_str!("ui/documentation.html");
+const EVALUATION_USER_ID: &str = "kilovolt-evaluation";
+
+#[derive(serde::Deserialize)]
+pub struct SetupForm {
+    provider_api_key: String,
+    project_budget: String,
+    default_budget: String,
+}
+
+#[derive(serde::Deserialize)]
+pub struct BudgetUpdateForm {
+    project_budget: String,
+    default_budget: String,
+}
+
+#[derive(serde::Serialize)]
+struct BudgetUpdatePayload {
+    ok: bool,
+    message: String,
+    project_budget_usd: f64,
+    default_budget_usd: f64,
+    current_project_spend_usd: f64,
+}
+
 #[derive(serde::Serialize)]
 struct StatsPayload {
     health: HealthStats,
@@ -27,6 +59,8 @@ struct HealthStats {
 #[derive(serde::Serialize)]
 struct BudgetStats {
     total_tokens_consumed: usize,
+    recent_accepted_requests: usize,
+    recent_blocked_requests: usize,
     project_budget_usd: f64,
     current_project_spend_usd: f64,
     default_budget_usd: f64,
@@ -42,7 +76,19 @@ struct LedgerMetadata {
     multi_instance_safe: bool,
 }
 
-/// Helper function to retrieve RSS memory usage of the current process on Linux.
+#[derive(serde::Serialize)]
+struct EvaluationTestPayload {
+    ok: bool,
+    status: u16,
+    message: String,
+    model: String,
+    tokens: usize,
+    spend_usd: f64,
+    latency_ms: u64,
+    project_calculated_spend_usd: f64,
+    user_calculated_spend_usd: f64,
+}
+
 fn get_memory_usage_kb() -> usize {
     #[cfg(target_os = "linux")]
     {
@@ -59,20 +105,32 @@ fn get_memory_usage_kb() -> usize {
             }
         }
     }
-    // Fallback/mock RSS memory usage (e.g. 15MB) when running locally on macOS
     15360
 }
 
 fn dashboard_auth_failure(state: &AppState, headers: &HeaderMap) -> Option<Response> {
+    if state.evaluation_mode() {
+        return (!state.evaluation_setup_complete()).then(|| {
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({
+                    "error": "setup_required",
+                    "message": "Complete local evaluation setup at /."
+                })),
+            )
+                .into_response()
+        });
+    }
+
     let Some(expected_token) = state.dashboard_token.as_deref() else {
         return Some(
             (
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(serde_json::json!({
-                "error": "dashboard_disabled",
-                "message": "Set KILOVOLT_DASHBOARD_TOKEN and restart Kilovolt to enable the dashboard."
-            })),
-        )
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({
+                    "error": "dashboard_disabled",
+                    "message": "Set KILOVOLT_DASHBOARD_TOKEN and restart Kilovolt to enable the dashboard."
+                })),
+            )
                 .into_response(),
         );
     };
@@ -113,48 +171,54 @@ fn dashboard_auth_failure(state: &AppState, headers: &HeaderMap) -> Option<Respo
             .into_response();
         response.headers_mut().insert(
             header::WWW_AUTHENTICATE,
-            axum::http::HeaderValue::from_static("Basic realm=\"Kilovolt dashboard\""),
+            HeaderValue::from_static("Basic realm=\"Kilovolt dashboard\""),
         );
         Some(response)
     }
 }
 
-/// REST endpoint `/api/stats` to expose local operational and budget state.
+/// REST endpoint `/api/stats` exposing process-local operational and budget state.
 pub async fn get_stats(State(state): State<AppState>, headers: HeaderMap) -> Response {
     if let Some(response) = dashboard_auth_failure(&state, &headers) {
         return response;
     }
 
-    let uptime = state.start_time.elapsed().as_secs();
-    let memory_usage = get_memory_usage_kb();
-
-    let total_reqs = state.total_requests.load(Ordering::Relaxed);
-    let total_lat = state.total_latency_ms.load(Ordering::Relaxed);
-    let avg_latency = if total_reqs > 0 {
-        total_lat as f64 / total_reqs as f64
+    let total_requests = state.total_requests.load(Ordering::Relaxed);
+    let total_latency = state.total_latency_ms.load(Ordering::Relaxed);
+    let avg_latency = if total_requests > 0 {
+        total_latency as f64 / total_requests as f64
     } else {
         0.0
     };
-
-    let recent = {
-        let list = state.recent_requests.lock().unwrap();
-        list.iter().cloned().collect::<Vec<RecentRequest>>()
-    };
-
+    let recent = state
+        .recent_requests
+        .lock()
+        .unwrap()
+        .iter()
+        .cloned()
+        .collect::<Vec<_>>();
     let ledger = state.budget_ledger.snapshot();
     let project = state.budget_ledger.project_snapshot();
+    let (project_budget, default_budget) = state.effective_budgets();
+    let recent_accepted_requests = recent.iter().filter(|request| request.status < 400).count();
+    let recent_blocked_requests = recent
+        .iter()
+        .filter(|request| request.status == StatusCode::TOO_MANY_REQUESTS.as_u16())
+        .count();
 
     let payload = StatsPayload {
         health: HealthStats {
-            uptime_seconds: uptime,
-            memory_usage_kb: memory_usage,
+            uptime_seconds: state.start_time.elapsed().as_secs(),
+            memory_usage_kb: get_memory_usage_kb(),
             avg_latency_ms: avg_latency,
         },
         budget: BudgetStats {
             total_tokens_consumed: state.total_tokens_consumed.load(Ordering::Relaxed),
-            project_budget_usd: state.project_budget,
+            recent_accepted_requests,
+            recent_blocked_requests,
+            project_budget_usd: project_budget,
             current_project_spend_usd: project.committed_spend,
-            default_budget_usd: state.default_budget,
+            default_budget_usd: default_budget,
             recent_requests: recent,
             current_spend_by_user: ledger,
         },
@@ -169,259 +233,548 @@ pub async fn get_stats(State(state): State<AppState>, headers: HeaderMap) -> Res
     (StatusCode::OK, Json(payload)).into_response()
 }
 
-/// Route handler to render the authenticated embedded HTML dashboard.
+fn with_no_store(mut response: Response) -> Response {
+    response
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    response
+}
+
+fn render_template(template: &str) -> String {
+    template.replace("{{APP_CSS}}", APP_CSS)
+}
+
+fn setup_page(error: Option<&str>) -> Response {
+    let error = error.map_or_else(String::new, |message| {
+        format!(
+            "<div class=\"error\" role=\"alert\">{}</div>",
+            escape_html(message)
+        )
+    });
+    let html = render_template(SETUP_HTML).replace("{{SETUP_ERROR}}", &error);
+    with_no_store(Html(html).into_response())
+}
+
+fn parse_budget(value: &str, label: &str) -> Result<f64, String> {
+    let parsed = value
+        .trim()
+        .parse::<f64>()
+        .map_err(|_| format!("{label} must be a number in USD."))?;
+    if !parsed.is_finite() || parsed < 0.0 {
+        return Err(format!(
+            "{label} must be a finite amount greater than or equal to zero."
+        ));
+    }
+    Ok(parsed)
+}
+
+fn evaluation_gateway_authorized(gateway_key: &str, browser_headers: &HeaderMap) -> bool {
+    browser_headers
+        .get("x-kilovolt-evaluation-key")
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|actual| secrets_match(gateway_key, actual))
+}
+
+fn budget_update_payload(state: &AppState, ok: bool, message: String) -> BudgetUpdatePayload {
+    let (project_budget, default_budget) = state.effective_budgets();
+    BudgetUpdatePayload {
+        ok,
+        message,
+        project_budget_usd: project_budget,
+        default_budget_usd: default_budget,
+        current_project_spend_usd: state.budget_ledger.project_snapshot().committed_spend,
+    }
+}
+
+fn generate_gateway_key() -> String {
+    format!(
+        "kvlt_{}{}",
+        uuid::Uuid::new_v4().simple(),
+        uuid::Uuid::new_v4().simple()
+    )
+}
+
+fn masked_secret(secret: &str, prefix: &str) -> String {
+    let suffix = secret.chars().rev().take(4).collect::<Vec<_>>();
+    let suffix = suffix.into_iter().rev().collect::<String>();
+    format!("{prefix}••••{suffix}")
+}
+
+fn masked_provider_key(provider_api_key: &str) -> String {
+    masked_secret(provider_api_key, "")
+}
+
+fn masked_gateway_key(gateway_key: &str) -> String {
+    let prefix = gateway_key.chars().take(9).collect::<String>();
+    let suffix = gateway_key
+        .chars()
+        .rev()
+        .take(5)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect::<String>();
+    format!("{prefix}••••••••••••••••{suffix}")
+}
+
+fn escape_html(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&#039;")
+}
+
+fn format_decimal(value: f64, precision: usize) -> String {
+    let formatted = format!("{value:.precision$}");
+    let trimmed = formatted.trim_end_matches('0').trim_end_matches('.');
+    if trimmed.is_empty() {
+        "0".to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+fn format_spend(value: f64) -> String {
+    if value == 0.0 {
+        "$0".to_string()
+    } else {
+        let precision = if value.abs() < 0.0001 { 7 } else { 5 };
+        format!("${}", format_decimal(value, precision))
+    }
+}
+
+fn format_budget(value: f64) -> String {
+    format!("${value:.2}")
+}
+
+fn format_latency(milliseconds: u64) -> String {
+    if milliseconds >= 1_000 {
+        format!("{} s", format_decimal(milliseconds as f64 / 1_000.0, 2))
+    } else {
+        format!("{milliseconds} ms")
+    }
+}
+
+fn latest_evaluation_request(state: &AppState) -> Option<RecentRequest> {
+    state
+        .recent_requests
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|request| request.user_id == EVALUATION_USER_ID)
+        .cloned()
+}
+
+fn render_onboarding(state: &AppState) -> String {
+    let setup = state
+        .evaluation_setup_snapshot()
+        .expect("onboarding requires completed evaluation setup");
+    let (project_budget, user_budget) = setup.budgets();
+    let result = state
+        .evaluation_test_succeeded()
+        .then(|| latest_evaluation_request(state))
+        .flatten();
+    let success_hidden = if result.is_some() { "" } else { "hidden" };
+    let verify_action_hidden = if result.is_some() { "hidden" } else { "" };
+    let result_model = result
+        .as_ref()
+        .map(|request| escape_html(&request.model))
+        .unwrap_or_default();
+    let result_tokens = result
+        .as_ref()
+        .map(|request| request.tokens.to_string())
+        .unwrap_or_default();
+    let result_spend = result
+        .as_ref()
+        .map(|request| format_spend(request.cost))
+        .unwrap_or_default();
+    let result_latency = result
+        .as_ref()
+        .map(|request| format_latency(request.duration_ms))
+        .unwrap_or_default();
+
+    render_template(ONBOARDING_HTML)
+        .replace(
+            "{{PROVIDER_KEY}}",
+            &escape_html(&masked_provider_key(setup.provider_api_key())),
+        )
+        .replace("{{PROJECT_BUDGET}}", &format_budget(project_budget))
+        .replace("{{USER_BUDGET}}", &format_budget(user_budget))
+        .replace("{{PROJECT_BUDGET_VALUE}}", &format!("{project_budget:.2}"))
+        .replace("{{USER_BUDGET_VALUE}}", &format!("{user_budget:.2}"))
+        .replace(
+            "{{VERIFICATION_COMPLETE}}",
+            if state.evaluation_test_succeeded() {
+                "true"
+            } else {
+                "false"
+            },
+        )
+        .replace("{{VERIFY_ACTION_HIDDEN}}", verify_action_hidden)
+        .replace("{{SUCCESS_HIDDEN}}", success_hidden)
+        .replace("{{RESULT_MODEL}}", &result_model)
+        .replace("{{RESULT_TOKENS}}", &result_tokens)
+        .replace("{{RESULT_SPEND}}", &result_spend)
+        .replace("{{RESULT_LATENCY}}", &result_latency)
+        .replace("{{GATEWAY_KEY}}", &escape_html(setup.gateway_key()))
+        .replace(
+            "{{MASKED_GATEWAY_KEY}}",
+            &escape_html(&masked_gateway_key(setup.gateway_key())),
+        )
+}
+
+fn render_dashboard(state: &AppState) -> String {
+    let (brand_href, getting_started_nav, monitor_progress, edit_limits_link) =
+        if state.evaluation_mode() {
+            (
+                "/",
+                "<a href=\"/\">Getting started</a>",
+                r#"<ol class="progress" aria-label="Onboarding progress">
+              <li class="complete"><a href="/#configure">1. Configure ✓</a></li>
+              <li class="complete"><a href="/#verify">2. Verify ✓</a></li>
+              <li class="complete"><a href="/#connect">3. Connect ✓</a></li>
+            </ol>"#,
+                "· <a href=\"/#budget-editor\">Edit limits</a>",
+            )
+        } else {
+            ("/dashboard", "", "", "")
+        };
+    render_template(DASHBOARD_HTML)
+        .replace("{{BRAND_HREF}}", brand_href)
+        .replace("{{GETTING_STARTED_NAV}}", getting_started_nav)
+        .replace("{{MONITOR_PROGRESS}}", monitor_progress)
+        .replace("{{EDIT_LIMITS_LINK}}", edit_limits_link)
+}
+
+fn render_documentation(state: &AppState) -> String {
+    let (brand_href, getting_started_nav) = if state.evaluation_mode() {
+        ("/", "<a href=\"/\">Getting started</a>")
+    } else {
+        ("/dashboard", "")
+    };
+    render_template(DOCUMENTATION_HTML)
+        .replace("{{BRAND_HREF}}", brand_href)
+        .replace("{{GETTING_STARTED_NAV}}", getting_started_nav)
+}
+
+fn evaluation_payload(
+    state: &AppState,
+    ok: bool,
+    status: StatusCode,
+    message: String,
+    request: Option<&RecentRequest>,
+) -> EvaluationTestPayload {
+    EvaluationTestPayload {
+        ok,
+        status: status.as_u16(),
+        message,
+        model: request
+            .map(|record| record.model.clone())
+            .unwrap_or_default(),
+        tokens: request.map_or(0, |record| record.tokens),
+        spend_usd: request.map_or(0.0, |record| record.cost),
+        latency_ms: request.map_or(0, |record| record.duration_ms),
+        project_calculated_spend_usd: state.budget_ledger.project_snapshot().committed_spend,
+        user_calculated_spend_usd: state
+            .budget_ledger
+            .user_snapshot(EVALUATION_USER_ID)
+            .committed_spend,
+    }
+}
+
+fn actionable_test_error(status: StatusCode) -> String {
+    match status {
+        StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => {
+            "OpenAI rejected the saved API key. Restart Kilovolt, enter a valid key, and try again."
+                .to_string()
+        }
+        StatusCode::TOO_MANY_REQUESTS => {
+            "The request was blocked by a spending limit or provider rate limit. Check the configured limits and OpenAI account, then try again."
+                .to_string()
+        }
+        StatusCode::BAD_GATEWAY | StatusCode::SERVICE_UNAVAILABLE | StatusCode::GATEWAY_TIMEOUT => {
+            "Kilovolt could not reach OpenAI. Check the network connection and try again."
+                .to_string()
+        }
+        StatusCode::BAD_REQUEST | StatusCode::UNPROCESSABLE_ENTITY => {
+            "OpenAI rejected the test request. Check that the saved key can use gpt-4o-mini, then try again."
+                .to_string()
+        }
+        _ => format!(
+            "The provider request failed with HTTP {}. Check provider access and try again.",
+            status.as_u16()
+        ),
+    }
+}
+
+/// Sends a small paid request through the same proxy and accounting handler used
+/// by customer applications, then returns only a sanitized result summary.
+pub async fn post_evaluation_test(
+    State(state): State<AppState>,
+    browser_headers: HeaderMap,
+) -> Response {
+    let Some(setup) = state.evaluation_setup_snapshot() else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let authorized = evaluation_gateway_authorized(setup.gateway_key(), &browser_headers);
+    if !authorized {
+        return with_no_store(
+            (
+                StatusCode::UNAUTHORIZED,
+                Json(evaluation_payload(
+                    &state,
+                    false,
+                    StatusCode::UNAUTHORIZED,
+                    "Kilovolt gateway key authentication failed.".to_string(),
+                    None,
+                )),
+            )
+                .into_response(),
+        );
+    }
+
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        header::AUTHORIZATION,
+        HeaderValue::from_str(&format!("Bearer {}", setup.gateway_key()))
+            .expect("generated evaluation gateway key is a valid header"),
+    );
+    headers.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/json"),
+    );
+    headers.insert("x-user-id", HeaderValue::from_static(EVALUATION_USER_ID));
+    let request = serde_json::json!({
+        "model": "gpt-4o-mini",
+        "messages": [{"role": "user", "content": "Reply with: Kilovolt is working."}],
+        "stream": false,
+        "max_completion_tokens": 16
+    });
+
+    let proxy_response = chat_completions_proxy(
+        State(state.clone()),
+        headers,
+        Body::from(request.to_string()),
+    )
+    .await;
+    let status = proxy_response.status();
+    let response_bytes = match proxy_response.into_body().collect().await {
+        Ok(collected) => collected.to_bytes(),
+        Err(_) => {
+            return with_no_store(
+                (
+                    StatusCode::BAD_GATEWAY,
+                    Json(evaluation_payload(
+                        &state,
+                        false,
+                        StatusCode::BAD_GATEWAY,
+                        "The test response could not be read safely. Check the provider connection and try again."
+                            .to_string(),
+                        None,
+                    )),
+                )
+                    .into_response(),
+            );
+        }
+    };
+
+    let ok = status.is_success();
+    if ok {
+        state.mark_evaluation_test_succeeded();
+    }
+    let recorded_request = latest_evaluation_request(&state);
+    let message = if ok {
+        "Kilovolt is working. You can now connect your application.".to_string()
+    } else {
+        actionable_test_error(status)
+    };
+
+    let mut payload = evaluation_payload(&state, ok, status, message, recorded_request.as_ref());
+    if ok
+        && let Ok(provider_response) = serde_json::from_slice::<serde_json::Value>(&response_bytes)
+    {
+        if let Some(model) = provider_response
+            .get("model")
+            .and_then(serde_json::Value::as_str)
+        {
+            payload.model = model.to_string();
+        }
+        if let Some(tokens) = provider_response
+            .pointer("/usage/total_tokens")
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|tokens| usize::try_from(tokens).ok())
+        {
+            payload.tokens = tokens;
+        }
+    }
+
+    with_no_store((status, Json(payload)).into_response())
+}
+
+/// Root route for the guided local evaluation journey.
+pub async fn get_root(State(state): State<AppState>) -> Response {
+    if !state.evaluation_mode() {
+        return (StatusCode::SEE_OTHER, [(header::LOCATION, "/dashboard")]).into_response();
+    }
+    if !state.evaluation_setup_complete() {
+        return setup_page(None);
+    }
+    with_no_store(Html(render_onboarding(&state)).into_response())
+}
+
+/// Completes the one-time, in-memory Docker evaluation setup.
+pub async fn post_setup(State(state): State<AppState>, Form(form): Form<SetupForm>) -> Response {
+    if !state.evaluation_mode() || state.evaluation_setup_complete() {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+
+    let provider_api_key = form.provider_api_key.trim();
+    if provider_api_key.is_empty() {
+        let mut response = setup_page(Some("OpenAI API key must not be empty."));
+        *response.status_mut() = StatusCode::UNPROCESSABLE_ENTITY;
+        return response;
+    }
+    if HeaderValue::from_str(&format!("Bearer {provider_api_key}")).is_err() {
+        let mut response = setup_page(Some("OpenAI API key contains invalid characters."));
+        *response.status_mut() = StatusCode::UNPROCESSABLE_ENTITY;
+        return response;
+    }
+
+    let project_budget = match parse_budget(&form.project_budget, "Project limit") {
+        Ok(value) => value,
+        Err(message) => {
+            let mut response = setup_page(Some(&message));
+            *response.status_mut() = StatusCode::UNPROCESSABLE_ENTITY;
+            return response;
+        }
+    };
+    let default_budget = match parse_budget(&form.default_budget, "Default per-user limit") {
+        Ok(value) => value,
+        Err(message) => {
+            let mut response = setup_page(Some(&message));
+            *response.status_mut() = StatusCode::UNPROCESSABLE_ENTITY;
+            return response;
+        }
+    };
+
+    if !state.complete_evaluation_setup(
+        Arc::from(provider_api_key),
+        Arc::from(generate_gateway_key()),
+        project_budget,
+        default_budget,
+    ) {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+
+    with_no_store(Html(render_onboarding(&state)).into_response())
+}
+
+/// Updates both evaluation budget limits together without changing recorded spend.
+pub async fn post_evaluation_budgets(
+    State(state): State<AppState>,
+    browser_headers: HeaderMap,
+    Form(form): Form<BudgetUpdateForm>,
+) -> Response {
+    let Some(setup) = state.evaluation_setup_snapshot() else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    if !evaluation_gateway_authorized(setup.gateway_key(), &browser_headers) {
+        return with_no_store(
+            (
+                StatusCode::UNAUTHORIZED,
+                Json(budget_update_payload(
+                    &state,
+                    false,
+                    "Kilovolt gateway key authentication failed.".to_string(),
+                )),
+            )
+                .into_response(),
+        );
+    }
+
+    let project_budget = match parse_budget(&form.project_budget, "Project limit") {
+        Ok(value) => value,
+        Err(message) => {
+            return with_no_store(
+                (
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    Json(budget_update_payload(&state, false, message)),
+                )
+                    .into_response(),
+            );
+        }
+    };
+    let default_budget = match parse_budget(&form.default_budget, "Default per-user limit") {
+        Ok(value) => value,
+        Err(message) => {
+            return with_no_store(
+                (
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    Json(budget_update_payload(&state, false, message)),
+                )
+                    .into_response(),
+            );
+        }
+    };
+
+    if !state.update_evaluation_budgets(project_budget, default_budget) {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+
+    with_no_store(
+        (
+            StatusCode::OK,
+            Json(budget_update_payload(
+                &state,
+                true,
+                "Spending limits updated. Existing calculated spend was preserved.".to_string(),
+            )),
+        )
+            .into_response(),
+    )
+}
+
+/// Route handler for the authenticated operational dashboard.
 pub async fn get_dashboard(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    if state.evaluation_mode() && !state.evaluation_setup_complete() {
+        return setup_page(None);
+    }
     if let Some(response) = dashboard_auth_failure(&state, &headers) {
         return response;
     }
 
-    Html(DASHBOARD_HTML).into_response()
+    with_no_store(Html(render_dashboard(&state)).into_response())
 }
 
-// Embedded dashboard HTML template using Tailwind CSS via CDN and vanilla JS polling
-const DASHBOARD_HTML: &str = r#"<!DOCTYPE html>
-<html lang="en" class="h-full bg-slate-950 text-slate-100">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Kilovolt Dashboard ⚡</title>
-    <script src="https://cdn.tailwindcss.com"></script>
-    <script>
-        tailwind.config = {
-            theme: {
-                extend: {
-                    colors: {
-                        brand: {
-                            50: '#fefcf0',
-                            100: '#fdf7d5',
-                            500: '#eab308',
-                            900: '#713f12',
-                        }
-                    }
-                }
-            }
-        }
-    </script>
-</head>
-<body class="min-h-full flex flex-col font-sans">
-    <header class="border-b border-slate-800 bg-slate-900/50 backdrop-blur-md sticky top-0 z-50">
-        <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-16 flex items-center justify-between">
-            <div class="flex items-center space-x-3">
-                <span class="text-2xl">⚡</span>
-                <span class="text-xl font-bold tracking-tight bg-gradient-to-r from-yellow-400 to-amber-500 bg-clip-text text-transparent">Kilovolt Admin</span>
-            </div>
-            <div class="flex items-center space-x-2">
-                <span id="status-dot" class="h-2.5 w-2.5 rounded-full bg-green-500 animate-pulse"></span>
-                <span id="status-text" class="text-xs text-slate-400 font-medium">Live</span>
-            </div>
-        </div>
-    </header>
+/// Route handler for the local integration quick reference.
+pub async fn get_documentation(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    if !state.evaluation_mode()
+        && let Some(response) = dashboard_auth_failure(&state, &headers)
+    {
+        return response;
+    }
 
-    <main class="flex-grow max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-8">
-        <div class="rounded-xl border border-amber-700/60 bg-amber-950/30 px-4 py-3 text-sm text-amber-200">
-            <strong>Process-local ledger:</strong>
-            spend resets on restart and multiple instances do not share one budget.
-        </div>
-        <!-- Stats Overview Grid -->
-        <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
-            <!-- Card: System Health -->
-            <div class="bg-slate-900/60 border border-slate-800 rounded-2xl p-6 shadow-xl backdrop-blur-sm hover:border-slate-700 transition duration-300">
-                <div class="flex items-center justify-between mb-6">
-                    <h2 class="text-lg font-semibold text-slate-200 flex items-center space-x-2">
-                        <span>🖥️</span>
-                        <span>System Health</span>
-                    </h2>
-                    <span class="text-xs bg-slate-800 text-slate-400 px-2.5 py-1 rounded-full font-mono">Metrics</span>
-                </div>
-                <div class="grid grid-cols-2 gap-4">
-                    <div class="bg-slate-950/60 p-4 rounded-xl border border-slate-850">
-                        <p class="text-xs text-slate-500 font-medium uppercase tracking-wider">Uptime</p>
-                        <p id="uptime" class="text-xl font-bold text-slate-100 mt-1 font-mono">-</p>
-                    </div>
-                    <div class="bg-slate-950/60 p-4 rounded-xl border border-slate-850">
-                        <p class="text-xs text-slate-500 font-medium uppercase tracking-wider">Memory RSS</p>
-                        <p id="memory" class="text-xl font-bold text-slate-100 mt-1 font-mono">-</p>
-                    </div>
-                    <div class="bg-slate-950/60 p-4 rounded-xl border border-slate-850 col-span-2">
-                        <p class="text-xs text-slate-500 font-medium uppercase tracking-wider">Average Latency</p>
-                        <p id="latency" class="text-2xl font-black text-amber-400 mt-1 font-mono">-</p>
-                    </div>
-                </div>
-            </div>
-
-            <!-- Card: Budget Pipeline -->
-            <div class="bg-slate-900/60 border border-slate-800 rounded-2xl p-6 shadow-xl backdrop-blur-sm hover:border-slate-700 transition duration-300">
-                <div class="flex items-center justify-between mb-6">
-                    <h2 class="text-lg font-semibold text-slate-200 flex items-center space-x-2">
-                        <span>🛡️</span>
-                        <span>Budget Pipeline</span>
-                    </h2>
-                    <span class="text-xs bg-slate-800 text-slate-400 px-2.5 py-1 rounded-full font-mono">Ledger</span>
-                </div>
-                <div class="grid grid-cols-2 gap-4">
-                    <div class="bg-slate-950/60 p-4 rounded-xl border border-slate-850">
-                        <p class="text-xs text-slate-500 font-medium uppercase tracking-wider">Total Tokens</p>
-                        <p id="total-tokens" class="text-xl font-bold text-slate-100 mt-1 font-mono">-</p>
-                    </div>
-                    <div class="bg-slate-950/60 p-4 rounded-xl border border-slate-850">
-                        <p class="text-xs text-slate-500 font-medium uppercase tracking-wider">Default Budget</p>
-                        <p id="default-budget" class="text-xl font-bold text-slate-100 mt-1 font-mono">-</p>
-                    </div>
-                    <div class="bg-slate-950/60 p-4 rounded-xl border border-slate-850 col-span-2">
-                        <p class="text-xs text-slate-500 font-medium uppercase tracking-wider">Active Users Ledger</p>
-                        <div id="ledger-list" class="mt-2 space-y-1.5 max-h-24 overflow-y-auto text-sm">
-                            <p class="text-slate-500 text-xs italic">No active users yet.</p>
-                        </div>
-                    </div>
-                </div>
-            </div>
-        </div>
-
-        <!-- Recent Logs / Requests -->
-        <div class="bg-slate-900/40 border border-slate-800 rounded-2xl p-6 shadow-xl">
-            <h2 class="text-lg font-semibold text-slate-200 mb-4 flex items-center space-x-2">
-                <span>📋</span>
-                <span>Recent Proxy Transactions</span>
-            </h2>
-            <div class="overflow-x-auto">
-                <table class="min-w-full divide-y divide-slate-800 text-sm">
-                    <thead>
-                        <tr class="text-slate-400 font-medium text-left">
-                            <th class="py-3 px-4">Request ID</th>
-                            <th class="py-3 px-4">Time</th>
-                            <th class="py-3 px-4">User ID</th>
-                            <th class="py-3 px-4">Model</th>
-                            <th class="py-3 px-4 text-right">Tokens</th>
-                            <th class="py-3 px-4 text-right">Cost</th>
-                            <th class="py-3 px-4">Status</th>
-                            <th class="py-3 px-4 text-right">Latency</th>
-                        </tr>
-                    </thead>
-                    <tbody id="recent-requests-table" class="divide-y divide-slate-800/60 text-slate-300 font-mono">
-                        <tr>
-                            <td colspan="8" class="py-4 text-center text-slate-500 italic">Waiting for traffic...</td>
-                        </tr>
-                    </tbody>
-                </table>
-            </div>
-        </div>
-    </main>
-
-    <footer class="border-t border-slate-900 bg-slate-950/80 py-4 text-center text-xs text-slate-600">
-        Kilovolt Reverse Proxy Engine &copy; 2026. Made with Rust and Async speed.
-    </footer>
-
-    <script>
-        function formatUptime(seconds) {
-            const h = Math.floor(seconds / 3600);
-            const m = Math.floor((seconds % 3600) / 60);
-            const s = seconds % 60;
-            return `${h}h ${m}m ${s}s`;
-        }
-
-        function formatCost(val) {
-            if (val === 0) return '$0.00';
-            if (val < 0.0001) return `$${val.toFixed(7)}`;
-            return `$${val.toFixed(5)}`;
-        }
-
-        function escapeHtml(value) {
-            return String(value)
-                .replaceAll('&', '&amp;')
-                .replaceAll('<', '&lt;')
-                .replaceAll('>', '&gt;')
-                .replaceAll('"', '&quot;')
-                .replaceAll("'", '&#039;');
-        }
-
-        async function fetchStats() {
-            try {
-                const response = await fetch('/api/stats');
-                if (!response.ok) throw new Error('API down');
-                const data = await response.json();
-
-                // System Health Updates
-                document.getElementById('uptime').innerText = formatUptime(data.health.uptime_seconds);
-                document.getElementById('memory').innerText = `${(data.health.memory_usage_kb / 1024).toFixed(2)} MB`;
-                document.getElementById('latency').innerText = `${data.health.avg_latency_ms.toFixed(2)} ms`;
-
-                // Budget Pipeline Updates
-                document.getElementById('total-tokens').innerText = data.budget.total_tokens_consumed.toLocaleString();
-                document.getElementById('default-budget').innerText = formatCost(data.budget.default_budget_usd);
-
-                // Render ledger
-                const ledgerList = document.getElementById('ledger-list');
-                ledgerList.innerHTML = '';
-                const users = Object.entries(data.budget.current_spend_by_user);
-                if (users.length === 0) {
-                    ledgerList.innerHTML = '<p class="text-slate-500 text-xs italic">No active users yet.</p>';
-                } else {
-                    users.forEach(([user, spend]) => {
-                        const isOver = spend >= data.budget.default_budget_usd;
-                        const statusClass = isOver ? 'text-red-400 font-bold' : 'text-green-400';
-                        ledgerList.innerHTML += `
-                            <div class="flex justify-between items-center bg-slate-950/80 px-3 py-1 rounded border border-slate-800/40">
-                                <span class="font-medium text-slate-400">${escapeHtml(user)}</span>
-                                <span class="${statusClass}">${formatCost(spend)}</span>
-                            </div>
-                        `;
-                    });
-                }
-
-                // Render recent requests
-                const tableBody = document.getElementById('recent-requests-table');
-                tableBody.innerHTML = '';
-                if (data.budget.recent_requests.length === 0) {
-                    tableBody.innerHTML = '<tr><td colspan="8" class="py-4 text-center text-slate-500 italic">Waiting for traffic...</td></tr>';
-                } else {
-                    data.budget.recent_requests.forEach(req => {
-                        const statusClass = req.status >= 400 ? 'text-red-400' : 'text-green-400';
-                        const shortReqId = req.request_id ? `${req.request_id.slice(0, 8)}...` : 'n/a';
-                        
-                        tableBody.innerHTML += `
-                            <tr class="hover:bg-slate-900/30 transition">
-                                <td class="py-3 px-4 text-slate-500 font-mono">${shortReqId}</td>
-                                <td class="py-3 px-4 text-slate-400">${escapeHtml(req.timestamp)}</td>
-                                <td class="py-3 px-4 font-bold text-slate-300">${escapeHtml(req.user_id)}</td>
-                                <td class="py-3 px-4 text-slate-400">${escapeHtml(req.model)}</td>
-                                <td class="py-3 px-4 text-right text-slate-300">${req.tokens.toLocaleString()}</td>
-                                <td class="py-3 px-4 text-right text-emerald-400 font-semibold">${formatCost(req.cost)}</td>
-                                <td class="py-3 px-4"><span class="px-2 py-0.5 rounded text-xs font-bold ${statusClass} bg-slate-950 border border-slate-800">${req.status}</span></td>
-                                <td class="py-3 px-4 text-right text-amber-500 font-semibold">${req.duration_ms} ms</td>
-                            </tr>
-                        `;
-                    });
-                }
-
-
-                // Status Dot indicator
-                document.getElementById('status-dot').className = 'h-2.5 w-2.5 rounded-full bg-green-500 animate-pulse';
-                document.getElementById('status-text').innerText = 'Live';
-            } catch (err) {
-                console.error(err);
-                document.getElementById('status-dot').className = 'h-2.5 w-2.5 rounded-full bg-red-500 animate-ping';
-                document.getElementById('status-text').innerText = 'Disconnected';
-            }
-        }
-
-        // Poll every 3 seconds
-        setInterval(fetchStats, 3000);
-        // Initial load
-        fetchStats();
-    </script>
-</body>
-</html>"#;
+    with_no_store(Html(render_documentation(&state)).into_response())
+}
 
 #[cfg(test)]
 mod tests {
-    use super::{get_dashboard, get_stats};
-    use axum::extract::State;
+    use super::{
+        BudgetUpdateForm, SetupForm, generate_gateway_key, get_dashboard, get_documentation,
+        get_root, get_stats, post_evaluation_budgets, post_evaluation_test, post_setup,
+    };
+    use axum::extract::{Form, State};
     use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
+    use axum::routing::post;
+    use axum::{Json, Router};
     use base64::{Engine as _, engine::general_purpose::STANDARD};
     use http_body_util::BodyExt;
     use std::sync::Arc;
 
-    use crate::config::test_state;
+    use crate::config::{test_evaluation_state, test_state};
+    use crate::ledger::{BudgetError, BudgetScope};
 
     fn bearer_headers(token: &str) -> HeaderMap {
         let mut headers = HeaderMap::new();
@@ -430,6 +783,16 @@ mod tests {
             HeaderValue::from_str(&format!("Bearer {token}")).expect("valid test header"),
         );
         headers
+    }
+
+    #[test]
+    fn generated_gateway_keys_are_high_entropy_and_unique() {
+        let first = generate_gateway_key();
+        let second = generate_gateway_key();
+        assert!(first.starts_with("kvlt_"));
+        assert_eq!(first.len(), 69);
+        assert!(first[5..].bytes().all(|byte| byte.is_ascii_hexdigit()));
+        assert_ne!(first, second);
     }
 
     #[tokio::test]
@@ -500,8 +863,10 @@ mod tests {
             HeaderValue::from_str(&format!("Basic {credentials}")).expect("valid test header"),
         );
 
-        let dashboard = get_dashboard(State(state), headers).await;
-        assert_eq!(dashboard.status(), StatusCode::OK);
+        assert_eq!(
+            get_dashboard(State(state), headers).await.status(),
+            StatusCode::OK
+        );
     }
 
     #[tokio::test]
@@ -513,5 +878,399 @@ mod tests {
         let stats = get_stats(State(state), HeaderMap::new()).await;
         assert_eq!(dashboard.status(), StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(stats.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[tokio::test]
+    async fn local_documentation_contains_verified_examples_without_setup_secrets() {
+        let state = test_evaluation_state(0);
+        let response = get_documentation(State(state), HeaderMap::new()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response
+                .headers()
+                .get(header::CACHE_CONTROL)
+                .and_then(|value| value.to_str().ok()),
+            Some("no-store")
+        );
+
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let html = String::from_utf8_lossy(&body);
+        assert!(html.contains("Use Kilovolt from your backend"));
+        assert!(html.contains("Python"));
+        assert!(html.contains("JavaScript"));
+        assert!(html.contains("curl http://127.0.0.1:8080/v1/chat/completions"));
+        assert!(html.contains("KILOVOLT_API_KEY"));
+        assert!(html.contains("X-User-ID"));
+        assert!(html.contains("Full GitHub documentation"));
+        assert!(!html.contains("kvlt_test_gateway"));
+    }
+
+    #[tokio::test]
+    async fn manual_mode_documentation_uses_dashboard_authentication() {
+        let state = test_state(0, 1.0);
+        assert_eq!(
+            get_documentation(State(state.clone()), HeaderMap::new())
+                .await
+                .status(),
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            get_documentation(State(state), bearer_headers("test-dashboard-token"))
+                .await
+                .status(),
+            StatusCode::OK
+        );
+    }
+
+    #[tokio::test]
+    async fn evaluation_setup_validates_input_masks_provider_and_closes_after_success() {
+        let state = test_evaluation_state(0);
+        let root = get_root(State(state.clone())).await;
+        let root_body = root.into_body().collect().await.unwrap().to_bytes();
+        let root_html = String::from_utf8_lossy(&root_body);
+        assert!(root_html.contains("Continue to verification"));
+        assert!(root_html.contains("Customize spending limits"));
+        assert!(root_html.contains("https://platform.openai.com/api-keys"));
+        assert!(root_html.contains("target=\"_blank\" rel=\"noopener noreferrer\""));
+
+        let empty_key = post_setup(
+            State(state.clone()),
+            Form(SetupForm {
+                provider_api_key: "  ".to_string(),
+                project_budget: "10".to_string(),
+                default_budget: "1".to_string(),
+            }),
+        )
+        .await;
+        assert_eq!(empty_key.status(), StatusCode::UNPROCESSABLE_ENTITY);
+
+        let invalid_key = post_setup(
+            State(state.clone()),
+            Form(SetupForm {
+                provider_api_key: "sk-invalid\nheader".to_string(),
+                project_budget: "10".to_string(),
+                default_budget: "1".to_string(),
+            }),
+        )
+        .await;
+        assert_eq!(invalid_key.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let invalid_key_body = invalid_key.into_body().collect().await.unwrap().to_bytes();
+        assert!(!String::from_utf8_lossy(&invalid_key_body).contains("sk-invalid"));
+
+        let invalid_budget = post_setup(
+            State(state.clone()),
+            Form(SetupForm {
+                provider_api_key: "sk-invalid-budget-secret".to_string(),
+                project_budget: "NaN".to_string(),
+                default_budget: "1".to_string(),
+            }),
+        )
+        .await;
+        assert_eq!(invalid_budget.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let invalid_body = invalid_budget
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes();
+        assert!(!String::from_utf8_lossy(&invalid_body).contains("sk-invalid-budget-secret"));
+
+        let provider_key = "sk-provider-secret-ABCD";
+        let configured = post_setup(
+            State(state.clone()),
+            Form(SetupForm {
+                provider_api_key: provider_key.to_string(),
+                project_budget: "7.5".to_string(),
+                default_budget: "0.75".to_string(),
+            }),
+        )
+        .await;
+        assert_eq!(configured.status(), StatusCode::OK);
+        assert_eq!(
+            configured
+                .headers()
+                .get(header::CACHE_CONTROL)
+                .and_then(|value| value.to_str().ok()),
+            Some("no-store")
+        );
+        let configured_body = configured.into_body().collect().await.unwrap().to_bytes();
+        let configured_html = String::from_utf8_lossy(&configured_body);
+        assert!(!configured_html.contains(provider_key));
+        assert!(configured_html.contains("••••ABCD"));
+        assert!(configured_html.contains("Setup complete"));
+        assert!(configured_html.contains("Send test request"));
+        assert!(configured_html.contains("id=\"configure-stage\""));
+        assert!(configured_html.contains("data-stage-target=\"configure\""));
+        assert!(configured_html.contains("data-stage-target=\"verify\""));
+        assert!(configured_html.contains("data-stage-target=\"connect\" disabled"));
+        assert!(configured_html.contains("let verificationComplete = false;"));
+        assert!(!configured_html.contains("{{VERIFICATION_COMPLETE}}"));
+        assert!(configured_html.contains("href=\"/documentation\""));
+
+        let setup = state.evaluation_setup_snapshot().unwrap();
+        assert!(setup.gateway_key().starts_with("kvlt_"));
+        assert_eq!(setup.gateway_key().len(), 69);
+        assert_eq!(configured_html.matches(setup.gateway_key()).count(), 1);
+        assert_eq!(state.effective_budgets(), (7.5, 0.75));
+        assert_eq!(
+            get_stats(State(state.clone()), HeaderMap::new())
+                .await
+                .status(),
+            StatusCode::OK
+        );
+
+        let dashboard = get_dashboard(State(state.clone()), HeaderMap::new()).await;
+        let dashboard_body = dashboard.into_body().collect().await.unwrap().to_bytes();
+        let dashboard_html = String::from_utf8_lossy(&dashboard_body);
+        assert!(dashboard_html.contains("Monitor spending"));
+        assert!(dashboard_html.contains("Accepted"));
+        assert!(dashboard_html.contains("Blocked"));
+        assert!(dashboard_html.contains("href=\"/#configure\""));
+        assert!(dashboard_html.contains("href=\"/#verify\""));
+        assert!(dashboard_html.contains("href=\"/#connect\""));
+        assert!(
+            dashboard_html.find("Project spend").unwrap()
+                < dashboard_html.find("System health").unwrap()
+        );
+        assert!(!dashboard_html.contains(setup.gateway_key()));
+
+        let closed = post_setup(
+            State(state.clone()),
+            Form(SetupForm {
+                provider_api_key: "sk-replacement".to_string(),
+                project_budget: "20".to_string(),
+                default_budget: "2".to_string(),
+            }),
+        )
+        .await;
+        assert_eq!(closed.status(), StatusCode::NOT_FOUND);
+
+        let later_root = get_root(State(state)).await;
+        let later_body = later_root.into_body().collect().await.unwrap().to_bytes();
+        assert!(!String::from_utf8_lossy(&later_body).contains(provider_key));
+    }
+
+    #[tokio::test]
+    async fn evaluation_budget_update_is_authenticated_atomic_and_preserves_spend() {
+        let state = test_evaluation_state(0);
+        assert_eq!(
+            post_evaluation_budgets(
+                State(state.clone()),
+                HeaderMap::new(),
+                Form(BudgetUpdateForm {
+                    project_budget: "2".to_string(),
+                    default_budget: "0.5".to_string(),
+                }),
+            )
+            .await
+            .status(),
+            StatusCode::NOT_FOUND
+        );
+        assert!(state.complete_evaluation_setup(
+            Arc::from("sk-budget-update-secret"),
+            Arc::from("kvlt_budget_update_gateway"),
+            10.0,
+            1.0,
+        ));
+
+        state
+            .budget_ledger
+            .reserve_prompt("existing-spend", "budget-user", 0.25, 10.0, 1.0)
+            .unwrap();
+        state
+            .budget_ledger
+            .commit_prompt("existing-spend", "budget-user")
+            .unwrap();
+        let project_before = state.budget_ledger.project_snapshot();
+        let user_before = state.budget_ledger.user_snapshot("budget-user");
+
+        let unauthorized = post_evaluation_budgets(
+            State(state.clone()),
+            HeaderMap::new(),
+            Form(BudgetUpdateForm {
+                project_budget: "2".to_string(),
+                default_budget: "0.5".to_string(),
+            }),
+        )
+        .await;
+        assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(state.effective_budgets(), (10.0, 1.0));
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-kilovolt-evaluation-key",
+            HeaderValue::from_static("kvlt_budget_update_gateway"),
+        );
+        let invalid = post_evaluation_budgets(
+            State(state.clone()),
+            headers.clone(),
+            Form(BudgetUpdateForm {
+                project_budget: "not-a-budget".to_string(),
+                default_budget: "0.5".to_string(),
+            }),
+        )
+        .await;
+        assert_eq!(invalid.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(state.effective_budgets(), (10.0, 1.0));
+
+        let updated = post_evaluation_budgets(
+            State(state.clone()),
+            headers,
+            Form(BudgetUpdateForm {
+                project_budget: "0.10".to_string(),
+                default_budget: "0.10".to_string(),
+            }),
+        )
+        .await;
+        assert_eq!(updated.status(), StatusCode::OK);
+        let body = updated.into_body().collect().await.unwrap().to_bytes();
+        let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(payload["project_budget_usd"], 0.10);
+        assert_eq!(payload["default_budget_usd"], 0.10);
+        assert_eq!(payload["current_project_spend_usd"], 0.25);
+        assert_eq!(state.budget_ledger.project_snapshot(), project_before);
+        assert_eq!(
+            state.budget_ledger.user_snapshot("budget-user"),
+            user_before
+        );
+
+        let (project_budget, user_budget) = state.effective_budgets();
+        assert_eq!(
+            state.budget_ledger.reserve_prompt(
+                "future-request",
+                "budget-user",
+                0.01,
+                project_budget,
+                user_budget,
+            ),
+            Err(BudgetError::BudgetExceeded(BudgetScope::Project))
+        );
+        assert_eq!(state.budget_ledger.project_snapshot(), project_before);
+        assert_eq!(
+            state.budget_ledger.user_snapshot("budget-user"),
+            user_before
+        );
+    }
+
+    #[tokio::test]
+    async fn evaluation_test_uses_provider_key_and_returns_recorded_result() {
+        let (authorization_sender, mut authorization_receiver) =
+            tokio::sync::mpsc::unbounded_channel::<String>();
+        let app = Router::new().route(
+            "/v1/chat/completions",
+            post(move |headers: HeaderMap| {
+                let authorization_sender = authorization_sender.clone();
+                async move {
+                    let authorization = headers
+                        .get(header::AUTHORIZATION)
+                        .and_then(|value| value.to_str().ok())
+                        .unwrap_or_default()
+                        .to_string();
+                    authorization_sender.send(authorization).unwrap();
+                    Json(serde_json::json!({
+                        "id": "chatcmpl-evaluation-test",
+                        "model": "gpt-4o-mini-2024-07-18",
+                        "choices": [{"message": {"role": "assistant", "content": "Kilovolt is working."}}],
+                        "usage": {"prompt_tokens": 8, "completion_tokens": 4, "total_tokens": 12}
+                    }))
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let mut state = test_evaluation_state(0);
+        state.openai_upstream_url = format!("http://{address}/v1/chat/completions");
+        assert!(state.complete_evaluation_setup(
+            Arc::from("sk-provider-upstream-secret"),
+            Arc::from("kvlt_test_gateway"),
+            10.0,
+            1.0,
+        ));
+
+        assert_eq!(
+            post_evaluation_test(State(state.clone()), HeaderMap::new())
+                .await
+                .status(),
+            StatusCode::UNAUTHORIZED
+        );
+        let mut test_headers = HeaderMap::new();
+        test_headers.insert(
+            "x-kilovolt-evaluation-key",
+            HeaderValue::from_static("kvlt_test_gateway"),
+        );
+        let response = post_evaluation_test(State(state.clone()), test_headers).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let body_text = String::from_utf8_lossy(&body);
+        assert!(!body_text.contains("sk-provider-upstream-secret"));
+        let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(payload["ok"], true);
+        assert_eq!(payload["model"], "gpt-4o-mini-2024-07-18");
+        assert_eq!(payload["tokens"], 12);
+        assert!(payload["spend_usd"].as_f64().unwrap() > 0.0);
+        assert!(payload["project_calculated_spend_usd"].as_f64().unwrap() > 0.0);
+        assert!(state.evaluation_test_succeeded());
+        assert!(
+            state
+                .recent_requests
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|request| request.user_id == "kilovolt-evaluation")
+        );
+        assert_eq!(
+            authorization_receiver.recv().await.unwrap(),
+            "Bearer sk-provider-upstream-secret"
+        );
+
+        let onboarding = get_root(State(state)).await;
+        let onboarding_body = onboarding.into_body().collect().await.unwrap().to_bytes();
+        let onboarding_html = String::from_utf8_lossy(&onboarding_body);
+        assert!(onboarding_html.contains("let verificationComplete = true;"));
+        assert!(onboarding_html.contains("Kilovolt is working"));
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn evaluation_test_failure_is_actionable_and_sanitized() {
+        let app = Router::new().route(
+            "/v1/chat/completions",
+            post(|| async {
+                (
+                    StatusCode::UNAUTHORIZED,
+                    Json(serde_json::json!({
+                        "error": {"message": "rejected sk-provider-must-stay-secret"}
+                    })),
+                )
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let mut state = test_evaluation_state(0);
+        state.openai_upstream_url = format!("http://{address}/v1/chat/completions");
+        assert!(state.complete_evaluation_setup(
+            Arc::from("sk-provider-must-stay-secret"),
+            Arc::from("kvlt_failure_gateway"),
+            10.0,
+            1.0,
+        ));
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-kilovolt-evaluation-key",
+            HeaderValue::from_static("kvlt_failure_gateway"),
+        );
+
+        let response = post_evaluation_test(State(state), headers).await;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let text = String::from_utf8_lossy(&body);
+        assert!(text.contains("OpenAI rejected the saved API key"));
+        assert!(!text.contains("sk-provider-must-stay-secret"));
+        assert!(!text.contains("rejected sk-provider"));
+        server.abort();
     }
 }

@@ -1,0 +1,20 @@
+# Local evaluation only. The credentials below are intentionally fake and the
+# embedded mock is not a production provider.
+services:
+  kilovolt:
+    build:
+      context: .
+    ports:
+      - "127.0.0.1:${KILOVOLT_DEMO_PORT:-18080}:8080"
+    environment:
+      BIND_ADDR: 0.0.0.0
+      KILOVOLT_PORT: 8080
+      KILOVOLT_ACKNOWLEDGE_PROCESS_LOCAL_LEDGER: "true"
+      KILOVOLT_PROJECT_BUDGET: "0.000100"
+      KILOVOLT_DEFAULT_BUDGET: "0.000010"
+      KILOVOLT_PROXY_TOKEN: demo-proxy-token
+      KILOVOLT_DASHBOARD_TOKEN: demo-dashboard-token
+      KILOVOLT_ENABLE_MOCK_UPSTREAM: "true"
+      KILOVOLT_NON_STREAM_DEFAULT_MAX_OUTPUT_TOKENS: "16"
+      KILOVOLT_TELEMETRY_ENABLED: "false"
+    restart: "no"

@@ -87,6 +87,24 @@ fn proxy_auth_error() -> Response {
     )
 }
 
+fn evaluation_gateway_auth_error() -> Response {
+    make_error_response(
+        StatusCode::UNAUTHORIZED,
+        "Kilovolt gateway key authentication failed",
+        "authentication_error",
+        Some("kilovolt_gateway_auth_failed"),
+    )
+}
+
+fn evaluation_setup_required_error() -> Response {
+    make_error_response(
+        StatusCode::SERVICE_UNAVAILABLE,
+        "Complete local evaluation setup at http://127.0.0.1:8080 before proxying requests",
+        "invalid_request_error",
+        Some("setup_required"),
+    )
+}
+
 /// Deterministic local mock upstream used by tests and the benchmark harness.
 pub async fn mock_chat_completions(
     State(state): State<AppState>,
@@ -888,7 +906,16 @@ pub async fn chat_completions_proxy(
     let start_time = Instant::now();
     let request_id = uuid::Uuid::new_v4().to_string();
 
-    if !proxy_credentials_valid(&state, &headers) {
+    let evaluation_setup = if state.evaluation_mode() {
+        match state.evaluation_setup_snapshot() {
+            Some(setup) => Some(setup),
+            None => return evaluation_setup_required_error(),
+        }
+    } else {
+        None
+    };
+
+    if evaluation_setup.is_none() && !proxy_credentials_valid(&state, &headers) {
         state.record_request(
             &request_id,
             "anonymous",
@@ -980,6 +1007,31 @@ pub async fn chat_completions_proxy(
                 Some("invalid_api_key"),
             );
         }
+    };
+
+    let upstream_auth_val = if let Some(setup) = &evaluation_setup {
+        let gateway_key_is_valid = auth_val
+            .to_str()
+            .ok()
+            .and_then(|authorization| authorization.strip_prefix("Bearer "))
+            .is_some_and(|gateway_key| secrets_match(setup.gateway_key(), gateway_key));
+        if !gateway_key_is_valid {
+            state.record_request(
+                &request_id,
+                "anonymous",
+                "unknown",
+                401,
+                start_time.elapsed().as_millis() as u64,
+                0,
+                0.0,
+            );
+            return evaluation_gateway_auth_error();
+        }
+
+        axum::http::HeaderValue::from_str(&format!("Bearer {}", setup.provider_api_key()))
+            .expect("evaluation provider key was validated during setup")
+    } else {
+        auth_val.clone()
     };
 
     // 2. Extract and validate Content-Type header
@@ -1125,6 +1177,23 @@ pub async fn chat_completions_proxy(
     };
 
     let is_gemini = request.model.starts_with("gemini-");
+    if evaluation_setup.is_some() && is_gemini {
+        state.record_request(
+            &request_id,
+            &user_id,
+            &request.model,
+            400,
+            start_time.elapsed().as_millis() as u64,
+            0,
+            0.0,
+        );
+        return make_error_response(
+            StatusCode::BAD_REQUEST,
+            "Browser evaluation mode supports OpenAI models only",
+            "invalid_request_error",
+            Some("evaluation_openai_only"),
+        );
+    }
     if is_gemini && !request.stream {
         state.record_request(
             &request_id,
@@ -1332,22 +1401,23 @@ pub async fn chat_completions_proxy(
         Some((maximum_tokens, maximum_cost))
     };
 
+    let (project_budget_limit, user_budget_limit) = state.effective_budgets();
     let reservation_result = if let Some((_, maximum_output_cost)) = maximum_non_stream_output {
         state.budget_ledger.reserve_non_stream_request(
             &request_id,
             &user_id,
             prompt_cost,
             maximum_output_cost,
-            state.project_budget,
-            state.default_budget,
+            project_budget_limit,
+            user_budget_limit,
         )
     } else {
         state.budget_ledger.reserve_prompt(
             &request_id,
             &user_id,
             prompt_cost,
-            state.project_budget,
-            state.default_budget,
+            project_budget_limit,
+            user_budget_limit,
         )
     };
     let reservation = match reservation_result {
@@ -1365,8 +1435,8 @@ pub async fn chat_completions_proxy(
                 current_project_total_spend = %project_snapshot.total_spend,
                 current_user_total_spend = %user_snapshot.total_spend,
                 prompt_cost = %prompt_cost,
-                project_budget_limit = %state.project_budget,
-                user_budget_limit = %state.default_budget,
+                project_budget_limit = %project_budget_limit,
+                user_budget_limit = %user_budget_limit,
                 "Bankruptcy Shield tripped pre-flight: {}", error
             );
             state.record_request(
@@ -1452,7 +1522,7 @@ pub async fn chat_completions_proxy(
         .fetch_add(prompt_tokens, Ordering::Relaxed);
 
     // Extract raw API Key for downstream delivery
-    let api_key = auth_val
+    let api_key = upstream_auth_val
         .to_str()
         .unwrap_or("")
         .trim_start_matches("Bearer ")
@@ -1561,7 +1631,7 @@ pub async fn chat_completions_proxy(
             }
         };
         upstream_req = upstream_req
-            .header(reqwest::header::AUTHORIZATION, auth_val)
+            .header(reqwest::header::AUTHORIZATION, upstream_auth_val)
             .header(reqwest::header::CONTENT_TYPE, content_type_val)
             .body(forwarded_body);
     }
@@ -2089,7 +2159,7 @@ pub async fn chat_completions_proxy(
         prompt_tokens,
         prompt_cost,
         committed.user.total_spend,
-        state.default_budget,
+        user_budget_limit,
         state.clone(), // Pass state to enable stats updates on close/cancel
         is_gemini,
         pipeline_id,
@@ -2131,7 +2201,7 @@ mod tests {
     use std::time::Duration;
     use tiktoken_rs::{ChatCompletionRequestMessage, bpe_for_model, num_tokens_from_messages};
 
-    use crate::config::{AppState, test_state, test_state_with_budgets};
+    use crate::config::{AppState, test_evaluation_state, test_state, test_state_with_budgets};
     use crate::pricing::{ModelPricing, PricingRegistry, Provider};
 
     fn get_model_pricing(model: &str) -> ModelPricing {
@@ -2582,6 +2652,102 @@ mod tests {
                 .status(),
             StatusCode::UNAUTHORIZED
         );
+    }
+
+    #[tokio::test]
+    async fn evaluation_proxy_requires_setup_and_the_generated_gateway_key() {
+        let pending = test_evaluation_state(0);
+        let response = chat_completions_proxy(
+            State(pending.clone()),
+            HeaderMap::new(),
+            Body::from("body must not be parsed before setup"),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(pending.budget_ledger.project_snapshot().total_spend, 0.0);
+
+        let configured = test_evaluation_state(0);
+        assert!(configured.complete_evaluation_setup(
+            Arc::from("sk-provider-secret"),
+            Arc::from("kvlt_generated_gateway"),
+            10.0,
+            1.0,
+        ));
+        let mut headers = proxy_headers("evaluation-user");
+        headers.remove("x-mock-upstream");
+        headers.insert(
+            axum::http::header::AUTHORIZATION,
+            HeaderValue::from_static("Bearer wrong-gateway"),
+        );
+        let response = chat_completions_proxy(
+            State(configured.clone()),
+            headers,
+            Body::from("body must not be parsed with a bad gateway key"),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(configured.budget_ledger.project_snapshot().total_spend, 0.0);
+
+        let mut gemini_headers = proxy_headers("evaluation-user");
+        gemini_headers.remove("x-mock-upstream");
+        gemini_headers.insert(
+            axum::http::header::AUTHORIZATION,
+            HeaderValue::from_static("Bearer kvlt_generated_gateway"),
+        );
+        let gemini_response = chat_completions_proxy(
+            State(configured.clone()),
+            gemini_headers,
+            Body::from(
+                serde_json::json!({
+                    "model": "gemini-2.5-flash",
+                    "messages": [{"role": "user", "content": "test"}],
+                    "stream": true
+                })
+                .to_string(),
+            ),
+        )
+        .await;
+        assert_eq!(gemini_response.status(), StatusCode::BAD_REQUEST);
+        let gemini_body = gemini_response
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes();
+        assert!(String::from_utf8_lossy(&gemini_body).contains("evaluation_openai_only"));
+        assert_eq!(configured.budget_ledger.project_snapshot().total_spend, 0.0);
+
+        for (project_limit, user_limit, expected_message) in [
+            (0.0, 1.0, "Project Budget Exceeded"),
+            (1.0, 0.0, "User Budget Exceeded"),
+        ] {
+            let limited = test_evaluation_state(0);
+            assert!(limited.complete_evaluation_setup(
+                Arc::from("sk-provider-secret"),
+                Arc::from("kvlt_generated_gateway"),
+                project_limit,
+                user_limit,
+            ));
+            let mut headers = proxy_headers("evaluation-user");
+            headers.remove("x-mock-upstream");
+            headers.insert(
+                axum::http::header::AUTHORIZATION,
+                HeaderValue::from_static("Bearer kvlt_generated_gateway"),
+            );
+            let response =
+                chat_completions_proxy(State(limited.clone()), headers, proxy_body()).await;
+            assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+            let body = response.into_body().collect().await.unwrap().to_bytes();
+            assert!(String::from_utf8_lossy(&body).contains(expected_message));
+            assert_eq!(limited.budget_ledger.project_snapshot().total_spend, 0.0);
+            assert_eq!(
+                limited
+                    .budget_ledger
+                    .user_snapshot("evaluation-user")
+                    .total_spend,
+                0.0
+            );
+        }
     }
 
     #[tokio::test]

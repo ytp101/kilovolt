@@ -1,12 +1,18 @@
 # Configuration reference
 
-All configuration is read from the environment at startup. Every change in this
-table therefore requires a process restart.
+The unconfigured Docker quick start collects its OpenAI key and two budget limits
+in the browser and stores them only in the running process. This table covers the
+advanced environment-configured mode. Environment changes require a process
+restart. Startup fails with a named configuration error for invalid financial
+limits, strict security booleans, pricing files, non-stream output defaults,
+deployment exposure, or active provider/telemetry URLs. A malformed telemetry
+URL is ignored while telemetry is disabled because it cannot receive data.
+There is no configuration-file schema or validation CLI in this phase.
 
 | Variable | Type | Default / required | Security and behavior | Example |
 |---|---|---|---|---|
 | `KILOVOLT_PORT` | `u16` | `8080`, optional | Listening port. Invalid values fall back to the default. | `8080` |
-| `BIND_ADDR` | string | `127.0.0.1`, optional | Preferred bind host or full `host:port`. Non-loopback startup requires the ledger acknowledgement and proxy authentication or its unsafe override. | `127.0.0.1` |
+| `BIND_ADDR` | string | `0.0.0.0` in Docker; `127.0.0.1` otherwise | Preferred bind host or full `host:port`. Unconfigured Docker uses the browser evaluation flow. Other non-loopback startup requires the ledger acknowledgement and proxy authentication or its unsafe override. | `127.0.0.1` |
 | `HOST` | string | none, optional legacy fallback | Used only when `BIND_ADDR` is absent. Same exposure implications. | `127.0.0.1` |
 | `KILOVOLT_PROJECT_BUDGET` | finite non-negative `f64` USD estimate | Falls back to `KILOVOLT_DEFAULT_BUDGET` | Deployment-wide calculated-spend limit shared by all users. Floating-point limitations apply. | `100.00` |
 | `KILOVOLT_DEFAULT_BUDGET` | finite non-negative `f64` USD estimate | `1.00` | Default per-`X-User-ID` calculated-spend limit. No runtime per-user override API exists. | `5.00` |
@@ -23,7 +29,7 @@ table therefore requires a process restart.
 | `KILOVOLT_ENABLE_MOCK_UPSTREAM` | strict boolean | `false` | Enables the embedded test/benchmark route and `X-Mock-Upstream`. Never enable as a production feature. | `true` for local tests only |
 | `KILOVOLT_DASHBOARD_TOKEN` | non-empty secret string | none; dashboard disabled | Enables `/dashboard` and `/api/stats`. Use high entropy, TLS, and private exposure. | output of `openssl rand -hex 32` |
 | `KILOVOLT_TELEMETRY_ENABLED` | boolean (`true/false`, `1/0`, `yes/no`, `on/off`) | `false` | Explicitly opts into company telemetry. Invalid values use `false`. | `false` |
-| `KILOVOLT_TELEMETRY_URL` | absolute HTTP(S) URL | `https://kilovolt.vercel.app/v1/update-check` | Used only when telemetry is enabled. Receives the fields in [telemetry.md](telemetry.md). | `http://127.0.0.1:9000/telemetry` |
+| `KILOVOLT_TELEMETRY_URL` | absolute HTTP(S) URL | `https://kilovolt.vercel.app/v1/update-check` | Used only when telemetry is enabled. A malformed/non-HTTP(S) value fails startup when enabled and is ignored when disabled. Receives the fields in [telemetry.md](telemetry.md). | `http://127.0.0.1:9000/telemetry` |
 | `KILOVOLT_PER_STEP_TOKENS` | positive integer tokens | none | Rejects a prompt whose locally estimated prompt tokens exceed the value. | `2048` |
 | `KILOVOLT_PER_PIPELINE_TOKENS` | positive integer tokens | none | Requires `X-Pipeline-ID` to group usage. The check/update is not a financial reservation and is weaker under concurrency. | `10000` |
 | `KILOVOLT_PER_DAY_TOKENS` | positive integer tokens | none | Process-local counter reset at server-local midnight. The check/update is not atomic with request execution. | `100000` |
@@ -33,8 +39,8 @@ table therefore requires a process restart.
 
 | Header | Required | Meaning |
 |---|---|---|
-| `Authorization: Bearer …` | yes | Forwarded to OpenAI-compatible upstreams; translated to `x-goog-api-key` for Gemini. |
-| `X-Kilovolt-Key` | when `KILOVOLT_PROXY_TOKEN` is configured | Independent gateway credential checked before body parsing or budget reservation. It is not forwarded to real upstreams. |
+| `Authorization: Bearer …` | yes | Browser evaluation mode validates the generated Kilovolt gateway key and substitutes the stored provider key. Configured manual mode forwards this value to OpenAI-compatible upstreams or translates it to `x-goog-api-key` for Gemini. |
+| `X-Kilovolt-Key` | configured manual mode when `KILOVOLT_PROXY_TOKEN` is set | Independent proxy credential checked before body parsing or budget reservation. It is not forwarded to real upstreams. Browser evaluation mode does not use this header. |
 | `Content-Type: application/json` | yes | Required request media type. |
 | `X-User-ID` | strongly recommended | Trusted backend identity. Missing values use the shared `anonymous` account. |
 | `X-Pipeline-ID` | only for pipeline grouping | Process-local pipeline-run key. |
