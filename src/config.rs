@@ -82,6 +82,24 @@ impl EvaluationSetupState {
         true
     }
 
+    pub fn update_budgets(&self, project_budget: f64, default_budget: f64) -> bool {
+        if !project_budget.is_finite()
+            || project_budget < 0.0
+            || !default_budget.is_finite()
+            || default_budget < 0.0
+        {
+            return false;
+        }
+
+        let mut configured = self.configured.write().unwrap();
+        let Some(setup) = configured.as_mut() else {
+            return false;
+        };
+        setup.project_budget = project_budget;
+        setup.default_budget = default_budget;
+        true
+    }
+
     pub fn mark_test_succeeded(&self) {
         self.test_succeeded.store(true, Ordering::Release);
     }
@@ -190,6 +208,12 @@ impl AppState {
             .map_or((self.project_budget, self.default_budget), |setup| {
                 setup.budgets()
             })
+    }
+
+    pub fn update_evaluation_budgets(&self, project_budget: f64, default_budget: f64) -> bool {
+        self.evaluation_setup
+            .as_ref()
+            .is_some_and(|setup| setup.update_budgets(project_budget, default_budget))
     }
 
     pub fn mark_evaluation_test_succeeded(&self) {
@@ -385,6 +409,16 @@ mod tests {
         assert_eq!(configured.provider_api_key(), "provider-secret");
         assert_eq!(configured.gateway_key(), "gateway-secret");
         assert_eq!(state.effective_budgets(), (4.0, 0.5));
+        assert!(state.update_evaluation_budgets(6.0, 0.75));
+        assert_eq!(state.effective_budgets(), (6.0, 0.75));
+        assert!(!state.update_evaluation_budgets(f64::NAN, 1.0));
+        assert!(!state.update_evaluation_budgets(1.0, -1.0));
+        assert_eq!(state.effective_budgets(), (6.0, 0.75));
+        let updated = state
+            .evaluation_setup_snapshot()
+            .expect("evaluation setup should remain configured");
+        assert_eq!(updated.provider_api_key(), "provider-secret");
+        assert_eq!(updated.gateway_key(), "gateway-secret");
         state.mark_evaluation_test_succeeded();
         assert!(state.evaluation_test_succeeded());
     }

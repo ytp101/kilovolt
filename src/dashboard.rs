@@ -27,6 +27,21 @@ pub struct SetupForm {
     default_budget: String,
 }
 
+#[derive(serde::Deserialize)]
+pub struct BudgetUpdateForm {
+    project_budget: String,
+    default_budget: String,
+}
+
+#[derive(serde::Serialize)]
+struct BudgetUpdatePayload {
+    ok: bool,
+    message: String,
+    project_budget_usd: f64,
+    default_budget_usd: f64,
+    current_project_spend_usd: f64,
+}
+
 #[derive(serde::Serialize)]
 struct StatsPayload {
     health: HealthStats,
@@ -253,6 +268,24 @@ fn parse_budget(value: &str, label: &str) -> Result<f64, String> {
     Ok(parsed)
 }
 
+fn evaluation_gateway_authorized(gateway_key: &str, browser_headers: &HeaderMap) -> bool {
+    browser_headers
+        .get("x-kilovolt-evaluation-key")
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|actual| secrets_match(gateway_key, actual))
+}
+
+fn budget_update_payload(state: &AppState, ok: bool, message: String) -> BudgetUpdatePayload {
+    let (project_budget, default_budget) = state.effective_budgets();
+    BudgetUpdatePayload {
+        ok,
+        message,
+        project_budget_usd: project_budget,
+        default_budget_usd: default_budget,
+        current_project_spend_usd: state.budget_ledger.project_snapshot().committed_spend,
+    }
+}
+
 fn generate_gateway_key() -> String {
     format!(
         "kvlt_{}{}",
@@ -369,6 +402,8 @@ fn render_onboarding(state: &AppState) -> String {
         )
         .replace("{{PROJECT_BUDGET}}", &format_budget(project_budget))
         .replace("{{USER_BUDGET}}", &format_budget(user_budget))
+        .replace("{{PROJECT_BUDGET_VALUE}}", &format!("{project_budget:.2}"))
+        .replace("{{USER_BUDGET_VALUE}}", &format!("{user_budget:.2}"))
         .replace("{{VERIFY_ACTION_HIDDEN}}", verify_action_hidden)
         .replace("{{SUCCESS_HIDDEN}}", success_hidden)
         .replace("{{RESULT_MODEL}}", &result_model)
@@ -383,23 +418,26 @@ fn render_onboarding(state: &AppState) -> String {
 }
 
 fn render_dashboard(state: &AppState) -> String {
-    let (brand_href, getting_started_nav, monitor_progress) = if state.evaluation_mode() {
-        (
-            "/",
-            "<a href=\"/\">Getting started</a>",
-            r#"<ol class="progress" aria-label="Onboarding progress">
+    let (brand_href, getting_started_nav, monitor_progress, edit_limits_link) =
+        if state.evaluation_mode() {
+            (
+                "/",
+                "<a href=\"/\">Getting started</a>",
+                r#"<ol class="progress" aria-label="Onboarding progress">
               <li class="complete">1. Configure ✓</li>
               <li class="complete">2. Verify ✓</li>
               <li class="complete">3. Connect ✓</li>
             </ol>"#,
-        )
-    } else {
-        ("/dashboard", "", "")
-    };
+                "· <a href=\"/#budget-editor\">Edit limits</a>",
+            )
+        } else {
+            ("/dashboard", "", "", "")
+        };
     render_template(DASHBOARD_HTML)
         .replace("{{BRAND_HREF}}", brand_href)
         .replace("{{GETTING_STARTED_NAV}}", getting_started_nav)
         .replace("{{MONITOR_PROGRESS}}", monitor_progress)
+        .replace("{{EDIT_LIMITS_LINK}}", edit_limits_link)
 }
 
 fn render_documentation(state: &AppState) -> String {
@@ -472,10 +510,7 @@ pub async fn post_evaluation_test(
     let Some(setup) = state.evaluation_setup_snapshot() else {
         return StatusCode::NOT_FOUND.into_response();
     };
-    let authorized = browser_headers
-        .get("x-kilovolt-evaluation-key")
-        .and_then(|value| value.to_str().ok())
-        .is_some_and(|actual| secrets_match(setup.gateway_key(), actual));
+    let authorized = evaluation_gateway_authorized(setup.gateway_key(), &browser_headers);
     if !authorized {
         return with_no_store(
             (
@@ -628,6 +663,71 @@ pub async fn post_setup(State(state): State<AppState>, Form(form): Form<SetupFor
     with_no_store(Html(render_onboarding(&state)).into_response())
 }
 
+/// Updates both evaluation budget limits together without changing recorded spend.
+pub async fn post_evaluation_budgets(
+    State(state): State<AppState>,
+    browser_headers: HeaderMap,
+    Form(form): Form<BudgetUpdateForm>,
+) -> Response {
+    let Some(setup) = state.evaluation_setup_snapshot() else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    if !evaluation_gateway_authorized(setup.gateway_key(), &browser_headers) {
+        return with_no_store(
+            (
+                StatusCode::UNAUTHORIZED,
+                Json(budget_update_payload(
+                    &state,
+                    false,
+                    "Kilovolt gateway key authentication failed.".to_string(),
+                )),
+            )
+                .into_response(),
+        );
+    }
+
+    let project_budget = match parse_budget(&form.project_budget, "Project limit") {
+        Ok(value) => value,
+        Err(message) => {
+            return with_no_store(
+                (
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    Json(budget_update_payload(&state, false, message)),
+                )
+                    .into_response(),
+            );
+        }
+    };
+    let default_budget = match parse_budget(&form.default_budget, "Default per-user limit") {
+        Ok(value) => value,
+        Err(message) => {
+            return with_no_store(
+                (
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    Json(budget_update_payload(&state, false, message)),
+                )
+                    .into_response(),
+            );
+        }
+    };
+
+    if !state.update_evaluation_budgets(project_budget, default_budget) {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+
+    with_no_store(
+        (
+            StatusCode::OK,
+            Json(budget_update_payload(
+                &state,
+                true,
+                "Spending limits updated. Existing calculated spend was preserved.".to_string(),
+            )),
+        )
+            .into_response(),
+    )
+}
+
 /// Route handler for the authenticated operational dashboard.
 pub async fn get_dashboard(State(state): State<AppState>, headers: HeaderMap) -> Response {
     if state.evaluation_mode() && !state.evaluation_setup_complete() {
@@ -654,8 +754,8 @@ pub async fn get_documentation(State(state): State<AppState>, headers: HeaderMap
 #[cfg(test)]
 mod tests {
     use super::{
-        SetupForm, generate_gateway_key, get_dashboard, get_documentation, get_root, get_stats,
-        post_evaluation_test, post_setup,
+        BudgetUpdateForm, SetupForm, generate_gateway_key, get_dashboard, get_documentation,
+        get_root, get_stats, post_evaluation_budgets, post_evaluation_test, post_setup,
     };
     use axum::extract::{Form, State};
     use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
@@ -666,6 +766,7 @@ mod tests {
     use std::sync::Arc;
 
     use crate::config::{test_evaluation_state, test_state};
+    use crate::ledger::{BudgetError, BudgetScope};
 
     fn bearer_headers(token: &str) -> HeaderMap {
         let mut headers = HeaderMap::new();
@@ -930,6 +1031,108 @@ mod tests {
         let later_root = get_root(State(state)).await;
         let later_body = later_root.into_body().collect().await.unwrap().to_bytes();
         assert!(!String::from_utf8_lossy(&later_body).contains(provider_key));
+    }
+
+    #[tokio::test]
+    async fn evaluation_budget_update_is_authenticated_atomic_and_preserves_spend() {
+        let state = test_evaluation_state(0);
+        assert_eq!(
+            post_evaluation_budgets(
+                State(state.clone()),
+                HeaderMap::new(),
+                Form(BudgetUpdateForm {
+                    project_budget: "2".to_string(),
+                    default_budget: "0.5".to_string(),
+                }),
+            )
+            .await
+            .status(),
+            StatusCode::NOT_FOUND
+        );
+        assert!(state.complete_evaluation_setup(
+            Arc::from("sk-budget-update-secret"),
+            Arc::from("kvlt_budget_update_gateway"),
+            10.0,
+            1.0,
+        ));
+
+        state
+            .budget_ledger
+            .reserve_prompt("existing-spend", "budget-user", 0.25, 10.0, 1.0)
+            .unwrap();
+        state
+            .budget_ledger
+            .commit_prompt("existing-spend", "budget-user")
+            .unwrap();
+        let project_before = state.budget_ledger.project_snapshot();
+        let user_before = state.budget_ledger.user_snapshot("budget-user");
+
+        let unauthorized = post_evaluation_budgets(
+            State(state.clone()),
+            HeaderMap::new(),
+            Form(BudgetUpdateForm {
+                project_budget: "2".to_string(),
+                default_budget: "0.5".to_string(),
+            }),
+        )
+        .await;
+        assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(state.effective_budgets(), (10.0, 1.0));
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-kilovolt-evaluation-key",
+            HeaderValue::from_static("kvlt_budget_update_gateway"),
+        );
+        let invalid = post_evaluation_budgets(
+            State(state.clone()),
+            headers.clone(),
+            Form(BudgetUpdateForm {
+                project_budget: "not-a-budget".to_string(),
+                default_budget: "0.5".to_string(),
+            }),
+        )
+        .await;
+        assert_eq!(invalid.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(state.effective_budgets(), (10.0, 1.0));
+
+        let updated = post_evaluation_budgets(
+            State(state.clone()),
+            headers,
+            Form(BudgetUpdateForm {
+                project_budget: "0.10".to_string(),
+                default_budget: "0.10".to_string(),
+            }),
+        )
+        .await;
+        assert_eq!(updated.status(), StatusCode::OK);
+        let body = updated.into_body().collect().await.unwrap().to_bytes();
+        let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(payload["project_budget_usd"], 0.10);
+        assert_eq!(payload["default_budget_usd"], 0.10);
+        assert_eq!(payload["current_project_spend_usd"], 0.25);
+        assert_eq!(state.budget_ledger.project_snapshot(), project_before);
+        assert_eq!(
+            state.budget_ledger.user_snapshot("budget-user"),
+            user_before
+        );
+
+        let (project_budget, user_budget) = state.effective_budgets();
+        assert_eq!(
+            state.budget_ledger.reserve_prompt(
+                "future-request",
+                "budget-user",
+                0.01,
+                project_budget,
+                user_budget,
+            ),
+            Err(BudgetError::BudgetExceeded(BudgetScope::Project))
+        );
+        assert_eq!(state.budget_ledger.project_snapshot(), project_before);
+        assert_eq!(
+            state.budget_ledger.user_snapshot("budget-user"),
+            user_before
+        );
     }
 
     #[tokio::test]

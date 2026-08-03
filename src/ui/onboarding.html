@@ -33,9 +33,30 @@
 
       <div class="setup-summary">
         <span>OpenAI key <code>{{PROVIDER_KEY}}</code></span>
-        <span><strong>{{PROJECT_BUDGET}}</strong> project limit</span>
-        <span><strong>{{USER_BUDGET}}</strong> per user</span>
+        <span><strong id="configured-project-budget">{{PROJECT_BUDGET}}</strong> project limit</span>
+        <span><strong id="configured-user-budget">{{USER_BUDGET}}</strong> per user</span>
       </div>
+
+      <details id="budget-editor" class="budget-editor">
+        <summary><strong>Edit spending limits</strong><span>Changes apply immediately</span></summary>
+        <form id="budget-update-form" class="budget-editor-body">
+          <div class="budget-fields">
+            <div>
+              <label class="field-label" for="edit-project-budget">Project limit</label>
+              <input id="edit-project-budget" name="project_budget" type="number" value="{{PROJECT_BUDGET_VALUE}}" min="0" step="0.01" required inputmode="decimal">
+            </div>
+            <div>
+              <label class="field-label" for="edit-user-budget">Default per-user limit</label>
+              <input id="edit-user-budget" name="default_budget" type="number" value="{{USER_BUDGET_VALUE}}" min="0" step="0.01" required inputmode="decimal">
+            </div>
+          </div>
+          <p class="hint">Saving limits does not reset calculated spend. A lower limit can block new requests or stop subsequent streaming output charges until the limit is raised.</p>
+          <div class="button-row compact-row">
+            <button id="save-budget-button" class="button secondary" type="submit">Save limits</button>
+          </div>
+          <p id="budget-update-status" class="form-status" role="status"></p>
+        </form>
+      </details>
 
       <div class="notice warning"><strong>This is a paid provider request.</strong> It uses <code>gpt-4o-mini</code> with a 16-token output cap and may create a very small OpenAI charge.</div>
 
@@ -172,6 +193,47 @@ await client.chat.completions.create(
       return milliseconds >= 1000 ? `${trimNumber(milliseconds / 1000, 2)} s` : `${milliseconds} ms`;
     }
 
+    function formatBudget(value) {
+      return `$${Number(value).toFixed(2)}`;
+    }
+
+    document.getElementById('budget-update-form').addEventListener('submit', async event => {
+      event.preventDefault();
+      const form = event.currentTarget;
+      const button = document.getElementById('save-budget-button');
+      const statusText = document.getElementById('budget-update-status');
+      button.disabled = true;
+      button.textContent = 'Saving…';
+      statusText.className = 'form-status';
+      statusText.textContent = '';
+
+      try {
+        const response = await fetch('/evaluation/budgets', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/x-www-form-urlencoded',
+            'X-Kilovolt-Evaluation-Key': gatewayKey,
+          },
+          body: new URLSearchParams(new FormData(form)),
+        });
+        const result = await response.json();
+        if (!result.ok) throw new Error(result.message || `Update failed with HTTP ${response.status}`);
+
+        document.getElementById('configured-project-budget').textContent = formatBudget(result.project_budget_usd);
+        document.getElementById('configured-user-budget').textContent = formatBudget(result.default_budget_usd);
+        document.getElementById('edit-project-budget').value = Number(result.project_budget_usd).toFixed(2);
+        document.getElementById('edit-user-budget').value = Number(result.default_budget_usd).toFixed(2);
+        statusText.className = 'form-status success';
+        statusText.textContent = result.message;
+      } catch (error) {
+        statusText.className = 'form-status failure';
+        statusText.textContent = error.message || 'Spending limits could not be updated.';
+      } finally {
+        button.disabled = false;
+        button.textContent = 'Save limits';
+      }
+    });
+
     async function sendTestRequest() {
       const activeButton = testButton && !testButton.hidden ? testButton : (failurePanel.hidden ? runAgainButton : tryAgainButton);
       [testButton, runAgainButton, tryAgainButton].filter(Boolean).forEach(button => button.disabled = true);
@@ -244,6 +306,10 @@ await client.chat.completions.create(
         });
       });
     });
+
+    if (window.location.hash === '#budget-editor') {
+      document.getElementById('budget-editor').open = true;
+    }
   </script>
 </body>
 </html>

@@ -22,7 +22,8 @@ use crate::config::{
     DEFAULT_MAX_UPSTREAM_BODY_BYTES, DEFAULT_TELEMETRY_URL, EvaluationSetupState, TelemetryConfig,
 };
 use crate::dashboard::{
-    get_dashboard, get_documentation, get_root, get_stats, post_evaluation_test, post_setup,
+    get_dashboard, get_documentation, get_root, get_stats, post_evaluation_budgets,
+    post_evaluation_test, post_setup,
 };
 use crate::ledger::BudgetLedger;
 use crate::pricing::PricingRegistry;
@@ -694,6 +695,7 @@ async fn main() {
         .route("/", get(get_root))
         .route("/setup", post(post_setup))
         .route("/evaluation/test", post(post_evaluation_test))
+        .route("/evaluation/budgets", post(post_evaluation_budgets))
         .route("/health", get(health_check))
         .route("/dashboard", get(get_dashboard))
         .route("/documentation", get(get_documentation))

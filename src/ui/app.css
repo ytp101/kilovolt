@@ -244,6 +244,17 @@ details.eval-notice p { margin: 8px 0 0; }
   font-size: 13px;
 }
 
+.budget-editor { margin: -10px 0 24px; border: 1px solid var(--border); border-radius: 11px; background: var(--surface-soft); }
+.budget-editor summary { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 15px; cursor: pointer; }
+.budget-editor summary strong { font-size: 13px; }
+.budget-editor summary span { color: var(--faint); font-size: 12px; }
+.budget-editor-body { padding: 0 15px 15px; border-top: 1px solid var(--border); }
+.budget-fields { display: grid; grid-template-columns: repeat(2, 1fr); gap: 12px; }
+.compact-row { margin-top: 14px; }
+.form-status { min-height: 20px; margin: 10px 0 0; color: var(--muted); font-size: 12px; }
+.form-status.success { color: var(--success); }
+.form-status.failure { color: var(--danger); }
+
 .result-card {
   margin-top: 22px;
   border: 1px solid #287552;
@@ -355,6 +366,7 @@ td.numeric, th.numeric { text-align: right; }
   .result-grid, .metric-grid { grid-template-columns: repeat(2, 1fr); }
   .dashboard-heading { align-items: flex-start; flex-direction: column; }
   .health-grid { grid-template-columns: 1fr; }
+  .budget-fields { grid-template-columns: 1fr; gap: 0; }
   .docs-shell { width: min(100% - 24px, 100%); }
   .docs-section { padding: 22px 18px; }
   .docs-outcomes { grid-template-columns: 1fr; }
