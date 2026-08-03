@@ -404,6 +404,14 @@ fn render_onboarding(state: &AppState) -> String {
         .replace("{{USER_BUDGET}}", &format_budget(user_budget))
         .replace("{{PROJECT_BUDGET_VALUE}}", &format!("{project_budget:.2}"))
         .replace("{{USER_BUDGET_VALUE}}", &format!("{user_budget:.2}"))
+        .replace(
+            "{{VERIFICATION_COMPLETE}}",
+            if state.evaluation_test_succeeded() {
+                "true"
+            } else {
+                "false"
+            },
+        )
         .replace("{{VERIFY_ACTION_HIDDEN}}", verify_action_hidden)
         .replace("{{SUCCESS_HIDDEN}}", success_hidden)
         .replace("{{RESULT_MODEL}}", &result_model)
@@ -424,9 +432,9 @@ fn render_dashboard(state: &AppState) -> String {
                 "/",
                 "<a href=\"/\">Getting started</a>",
                 r#"<ol class="progress" aria-label="Onboarding progress">
-              <li class="complete">1. Configure ✓</li>
-              <li class="complete">2. Verify ✓</li>
-              <li class="complete">3. Connect ✓</li>
+              <li class="complete"><a href="/#configure">1. Configure ✓</a></li>
+              <li class="complete"><a href="/#verify">2. Verify ✓</a></li>
+              <li class="complete"><a href="/#connect">3. Connect ✓</a></li>
             </ol>"#,
                 "· <a href=\"/#budget-editor\">Edit limits</a>",
             )
@@ -991,6 +999,12 @@ mod tests {
         assert!(configured_html.contains("••••ABCD"));
         assert!(configured_html.contains("Setup complete"));
         assert!(configured_html.contains("Send test request"));
+        assert!(configured_html.contains("id=\"configure-stage\""));
+        assert!(configured_html.contains("data-stage-target=\"configure\""));
+        assert!(configured_html.contains("data-stage-target=\"verify\""));
+        assert!(configured_html.contains("data-stage-target=\"connect\" disabled"));
+        assert!(configured_html.contains("let verificationComplete = false;"));
+        assert!(!configured_html.contains("{{VERIFICATION_COMPLETE}}"));
         assert!(configured_html.contains("href=\"/documentation\""));
 
         let setup = state.evaluation_setup_snapshot().unwrap();
@@ -1011,6 +1025,9 @@ mod tests {
         assert!(dashboard_html.contains("Monitor spending"));
         assert!(dashboard_html.contains("Accepted"));
         assert!(dashboard_html.contains("Blocked"));
+        assert!(dashboard_html.contains("href=\"/#configure\""));
+        assert!(dashboard_html.contains("href=\"/#verify\""));
+        assert!(dashboard_html.contains("href=\"/#connect\""));
         assert!(
             dashboard_html.find("Project spend").unwrap()
                 < dashboard_html.find("System health").unwrap()
@@ -1207,6 +1224,12 @@ mod tests {
             authorization_receiver.recv().await.unwrap(),
             "Bearer sk-provider-upstream-secret"
         );
+
+        let onboarding = get_root(State(state)).await;
+        let onboarding_body = onboarding.into_body().collect().await.unwrap().to_bytes();
+        let onboarding_html = String::from_utf8_lossy(&onboarding_body);
+        assert!(onboarding_html.contains("let verificationComplete = true;"));
+        assert!(onboarding_html.contains("Kilovolt is working"));
         server.abort();
     }
 

@@ -20,16 +20,22 @@
   </header>
 
   <main class="main-content onboarding">
-    <ol class="progress" id="progress" aria-label="Setup progress">
-      <li class="complete">1. Configure ✓</li>
-      <li id="verify-progress" class="active" aria-current="step">2. Verify</li>
-      <li id="connect-progress">3. Connect</li>
+    <ol class="progress stage-progress" id="progress" aria-label="Setup progress">
+      <li id="configure-progress" class="complete">
+        <button type="button" data-stage-target="configure">1. Configure ✓</button>
+      </li>
+      <li id="verify-progress" class="active" aria-current="step">
+        <button type="button" data-stage-target="verify">2. Verify <span id="verify-check" hidden>✓</span></button>
+      </li>
+      <li id="connect-progress">
+        <button id="connect-progress-button" type="button" data-stage-target="connect" disabled>3. Connect</button>
+      </li>
     </ol>
 
-    <section id="verify-stage" class="card stage-card" aria-labelledby="verify-heading">
+    <section id="configure-stage" class="card stage-card" aria-labelledby="configure-heading" hidden>
       <p class="small" style="color: var(--success); font-weight: 800; margin-bottom: 8px;">Setup complete</p>
-      <h1 id="verify-heading">Verify Kilovolt</h1>
-      <p class="lead">Send one small request through Kilovolt's full authentication, budget enforcement, provider, and accounting path.</p>
+      <h1 id="configure-heading" tabindex="-1">Review configuration</h1>
+      <p class="lead">Review the protected provider connection and adjust the spending limits that Kilovolt enforces.</p>
 
       <div class="setup-summary">
         <span>OpenAI key <code>{{PROVIDER_KEY}}</code></span>
@@ -58,11 +64,24 @@
         </form>
       </details>
 
+      <div class="notice"><strong>Provider key:</strong> Kilovolt never shows the full key again. Restart this temporary evaluation container to replace it.</div>
+
+      <div class="button-row">
+        <button class="button" type="button" data-stage-target="verify">Continue to verification</button>
+      </div>
+    </section>
+
+    <section id="verify-stage" class="card stage-card" aria-labelledby="verify-heading">
+      <p class="small" style="color: var(--success); font-weight: 800; margin-bottom: 8px;">Setup complete</p>
+      <h1 id="verify-heading" tabindex="-1">Verify Kilovolt</h1>
+      <p class="lead">Send one small request through Kilovolt's full authentication, budget enforcement, provider, and accounting path.</p>
+
       <div class="notice warning"><strong>This is a paid provider request.</strong> It uses <code>gpt-4o-mini</code> with a 16-token output cap and may create a very small OpenAI charge.</div>
 
       <div id="verify-action" {{VERIFY_ACTION_HIDDEN}}>
         <div class="button-row">
           <button id="test-request-button" class="button" type="button">Send test request</button>
+          <button class="button secondary" type="button" data-stage-target="configure">Back to configuration</button>
         </div>
       </div>
 
@@ -161,6 +180,7 @@ await client.chat.completions.create(
 
       <div class="button-row">
         <a class="button" href="/dashboard">Open dashboard</a>
+        <button class="button secondary" type="button" data-stage-target="verify">Back to verification</button>
         <a class="button secondary" href="/documentation">Read documentation</a>
       </div>
     </section>
@@ -178,6 +198,47 @@ await client.chat.completions.create(
     const testButton = document.getElementById('test-request-button');
     const runAgainButton = document.getElementById('run-again-button');
     const tryAgainButton = document.getElementById('try-again-button');
+    const stageNames = ['configure', 'verify', 'connect'];
+    let currentStage = 'verify';
+    let verificationComplete = {{VERIFICATION_COMPLETE}};
+
+    function showStage(stageName, { updateHistory = true, focus = true } = {}) {
+      if (!stageNames.includes(stageName) || (stageName === 'connect' && !verificationComplete)) {
+        stageName = 'verify';
+      }
+      currentStage = stageName;
+
+      stageNames.forEach(name => {
+        const isCurrent = name === stageName;
+        document.getElementById(`${name}-stage`).hidden = !isCurrent;
+        const progressItem = document.getElementById(`${name}-progress`);
+        const isComplete = name === 'configure' || (name === 'verify' && verificationComplete);
+        progressItem.classList.toggle('complete', isComplete);
+        progressItem.classList.toggle('active', isCurrent);
+        if (isCurrent) {
+          progressItem.setAttribute('aria-current', 'step');
+        } else {
+          progressItem.removeAttribute('aria-current');
+        }
+      });
+
+      document.getElementById('verify-check').hidden = !verificationComplete;
+      document.getElementById('connect-progress-button').disabled = !verificationComplete;
+
+      if (updateHistory) {
+        const url = new URL(window.location.href);
+        url.hash = stageName;
+        window.history.pushState({ stage: stageName }, '', url);
+      }
+      if (focus) {
+        document.getElementById(`${stageName}-heading`).focus({ preventScroll: true });
+        window.scrollTo({ top: 0, behavior: 'smooth' });
+      }
+    }
+
+    document.querySelectorAll('[data-stage-target]').forEach(control => {
+      control.addEventListener('click', () => showStage(control.dataset.stageTarget));
+    });
 
     function trimNumber(value, maximumDigits = 7) {
       return Number(value).toFixed(maximumDigits).replace(/0+$/, '').replace(/\.$/, '');
@@ -254,6 +315,8 @@ await client.chat.completions.create(
         document.getElementById('result-latency').textContent = formatLatency(result.latency_ms);
         verifyAction.hidden = true;
         successPanel.hidden = false;
+        verificationComplete = true;
+        showStage(currentStage, { updateHistory: false, focus: false });
       } catch (error) {
         successPanel.hidden = true;
         verifyAction.hidden = true;
@@ -271,16 +334,7 @@ await client.chat.completions.create(
     runAgainButton.addEventListener('click', sendTestRequest);
     tryAgainButton.addEventListener('click', sendTestRequest);
 
-    document.getElementById('connect-button').addEventListener('click', () => {
-      document.getElementById('verify-progress').className = 'complete';
-      document.getElementById('verify-progress').textContent = '2. Verify ✓';
-      document.getElementById('verify-progress').removeAttribute('aria-current');
-      document.getElementById('connect-progress').className = 'active';
-      document.getElementById('connect-progress').setAttribute('aria-current', 'step');
-      document.getElementById('connect-stage').hidden = false;
-      document.getElementById('connect-heading').focus({ preventScroll: true });
-      document.getElementById('connect-stage').scrollIntoView({ behavior: 'smooth', block: 'start' });
-    });
+    document.getElementById('connect-button').addEventListener('click', () => showStage('connect'));
 
     document.getElementById('reveal-key-button').addEventListener('click', event => {
       const revealing = event.currentTarget.getAttribute('aria-pressed') !== 'true';
@@ -307,9 +361,19 @@ await client.chat.completions.create(
       });
     });
 
-    if (window.location.hash === '#budget-editor') {
-      document.getElementById('budget-editor').open = true;
+    function stageFromLocation() {
+      if (window.location.hash === '#budget-editor') {
+        document.getElementById('budget-editor').open = true;
+        return 'configure';
+      }
+      const requestedStage = window.location.hash.slice(1);
+      return stageNames.includes(requestedStage) ? requestedStage : 'verify';
     }
+
+    window.addEventListener('popstate', () => {
+      showStage(stageFromLocation(), { updateHistory: false });
+    });
+    showStage(stageFromLocation(), { updateHistory: false, focus: false });
   </script>
 </body>
 </html>
