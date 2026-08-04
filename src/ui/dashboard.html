@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <link rel="icon" href="data:,">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%23080b12'/%3E%3Cpath d='M36 4 14 36h16l-2 24 22-34H34z' fill='%23f7c948'/%3E%3C/svg%3E">
   <title>Dashboard · Kilovolt</title>
   <style>{{APP_CSS}}</style>
 </head>
@@ -12,8 +12,8 @@
     <nav class="shell nav" aria-label="Primary navigation">
       <a class="brand" href="{{BRAND_HREF}}">⚡ Kilovolt</a>
       <div class="nav-links">
-        {{GETTING_STARTED_NAV}}
         <a class="active" href="/dashboard" aria-current="page">Dashboard</a>
+        {{GETTING_STARTED_NAV}}
         <a href="/documentation">Documentation</a>
       </div>
     </nav>
@@ -52,18 +52,7 @@
       </div>
     </section>
 
-    <section class="panel" aria-labelledby="users-heading">
-      <div class="panel-header">
-        <h2 id="users-heading">Active users</h2>
-        <span id="active-user-count" class="badge">0 users</span>
-      </div>
-      <div class="table-wrap">
-        <table>
-          <thead><tr><th>User</th><th class="numeric">Spend</th><th class="numeric">Limit</th><th>Status</th></tr></thead>
-          <tbody id="users-table"><tr><td colspan="4" class="empty">No active users yet.</td></tr></tbody>
-        </table>
-      </div>
-    </section>
+    {{CONNECT_PANEL}}
 
     <section class="panel" aria-labelledby="transactions-heading">
       <div class="panel-header">
@@ -74,6 +63,19 @@
         <table>
           <thead><tr><th>Time</th><th>User</th><th>Model</th><th class="numeric">Tokens</th><th class="numeric">Spend</th><th>Result</th><th class="numeric">Latency</th></tr></thead>
           <tbody id="transactions-table"><tr><td colspan="7" class="empty">Waiting for traffic…</td></tr></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="panel" aria-labelledby="users-heading">
+      <div class="panel-header">
+        <h2 id="users-heading">Active users</h2>
+        <span id="active-user-count" class="badge">0 users</span>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>User</th><th class="numeric">Spend</th><th class="numeric">Limit</th><th>Status</th></tr></thead>
+          <tbody id="users-table"><tr><td colspan="4" class="empty">No active users yet.</td></tr></tbody>
         </table>
       </div>
     </section>
@@ -90,7 +92,12 @@
     <p class="limitations">Evaluation limitations: one process owns one in-memory budget domain; restart resets setup and spend; multiple replicas do not coordinate. Calculated spend estimates provider billing, pricing may become stale, and <code>X-User-ID</code> is accounting identity—not authentication.</p>
   </main>
 
+  <div id="dashboard-toast" class="toast" role="status" hidden>Copied</div>
+
   <script>
+    let previousProjectSpend = null;
+    let knownRequestIds = new Set();
+
     function trimNumber(value, maximumDigits = 7) {
       return Number(value).toFixed(maximumDigits).replace(/0+$/, '').replace(/\.$/, '');
     }
@@ -131,7 +138,13 @@
         const data = await response.json();
         const budget = data.budget;
 
-        document.getElementById('project-budget-summary').textContent = `${formatSpend(budget.current_project_spend_usd)} spent of ${formatBudget(budget.project_budget_usd)}`;
+        const projectSummary = document.getElementById('project-budget-summary');
+        projectSummary.textContent = `${formatSpend(budget.current_project_spend_usd)} spent of ${formatBudget(budget.project_budget_usd)}`;
+        if (previousProjectSpend !== null && previousProjectSpend !== budget.current_project_spend_usd) {
+          projectSummary.closest('.metric-card').classList.add('metric-updated');
+          window.setTimeout(() => projectSummary.closest('.metric-card').classList.remove('metric-updated'), 1200);
+        }
+        previousProjectSpend = budget.current_project_spend_usd;
         document.getElementById('default-budget').textContent = `${formatBudget(budget.default_budget_usd)} per user`;
         document.getElementById('recent-accepted').textContent = budget.recent_accepted_requests.toLocaleString();
         document.getElementById('recent-blocked').textContent = budget.recent_blocked_requests.toLocaleString();
@@ -158,7 +171,8 @@
               const accepted = request.status < 400;
               const blocked = request.status === 429;
               const result = accepted ? 'Accepted' : (blocked ? 'Blocked' : 'Failed');
-              return `<tr>
+              const isNew = knownRequestIds.size > 0 && !knownRequestIds.has(request.request_id);
+              return `<tr class="${isNew ? 'new-transaction' : ''}">
                 <td class="mono">${escapeHtml(request.timestamp)}</td>
                 <td><strong style="color: var(--text)">${escapeHtml(request.user_id)}</strong></td>
                 <td>${escapeHtml(request.model)}</td>
@@ -168,6 +182,7 @@
                 <td class="numeric mono">${formatLatency(request.duration_ms)}</td>
               </tr>`;
             }).join('');
+        knownRequestIds = new Set(requests.map(request => request.request_id));
 
         document.getElementById('uptime').textContent = formatUptime(data.health.uptime_seconds);
         document.getElementById('memory').textContent = `${trimNumber(data.health.memory_usage_kb / 1024, 2)} MB`;
@@ -182,6 +197,57 @@
 
     fetchStats();
     window.setInterval(fetchStats, 3000);
+
+    const gatewaySecret = document.getElementById('gateway-secret');
+    if (gatewaySecret) {
+      const gatewayKey = gatewaySecret.dataset.key;
+      const gatewayDisplay = document.getElementById('gateway-display');
+      const maskedGatewayKey = gatewayDisplay.textContent;
+      const toast = document.getElementById('dashboard-toast');
+
+      function showCopied(label = 'Copied') {
+        toast.textContent = label;
+        toast.hidden = false;
+        window.setTimeout(() => { toast.hidden = true; }, 1800);
+      }
+
+      document.getElementById('reveal-key-button').addEventListener('click', event => {
+        const revealing = event.currentTarget.getAttribute('aria-pressed') !== 'true';
+        gatewayDisplay.textContent = revealing ? gatewayKey : maskedGatewayKey;
+        event.currentTarget.textContent = revealing ? 'Hide' : 'Reveal';
+        event.currentTarget.setAttribute('aria-pressed', String(revealing));
+      });
+
+      document.getElementById('copy-key-button').addEventListener('click', async () => {
+        await navigator.clipboard.writeText(gatewayKey);
+        showCopied('Gateway key copied');
+      });
+
+      document.querySelectorAll('[data-integration-tab]').forEach(tab => {
+        tab.addEventListener('click', () => {
+          document.querySelectorAll('[data-integration-tab]').forEach(candidate => {
+            const selected = candidate === tab;
+            candidate.classList.toggle('active', selected);
+            candidate.setAttribute('aria-selected', String(selected));
+            document.getElementById(candidate.dataset.integrationTab).hidden = !selected;
+          });
+        });
+      });
+
+      document.querySelectorAll('[data-copy-target]').forEach(button => {
+        button.addEventListener('click', async () => {
+          const source = document.getElementById(button.dataset.copyTarget);
+          await navigator.clipboard.writeText(source.textContent);
+          showCopied(`${button.dataset.copyTarget.replaceAll('-', ' ')} copied`);
+        });
+      });
+
+      document.querySelector('[data-copy-kind="env"]').addEventListener('click', async () => {
+        const env = `KILOVOLT_API_KEY=${gatewayKey}\nKILOVOLT_BASE_URL=http://127.0.0.1:8080/v1`;
+        await navigator.clipboard.writeText(env);
+        showCopied('.env copied');
+      });
+    }
   </script>
 </body>
 </html>

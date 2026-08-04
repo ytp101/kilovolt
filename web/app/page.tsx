@@ -2,39 +2,15 @@
 
 import React, { useState } from 'react';
 
+const DOCKER_COMMAND = 'docker run -p 127.0.0.1:8080:8080 yodsarun/kilovolt-proxy:latest';
+
 export default function Home() {
-  const [email, setEmail] = useState('');
-  const [submitting, setSubmitting] = useState(false);
-  const [submitted, setSubmitted] = useState(false);
-  const [message, setMessage] = useState('');
-  const [error, setError] = useState<string | null>(null);
+  const [dockerCopied, setDockerCopied] = useState(false);
 
-  const handleJoinWaitlist = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setSubmitting(true);
-    setError(null);
-
-    try {
-      const res = await fetch('/api/waitlist', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({ email }),
-      });
-
-      const data = await res.json();
-      if (res.ok) {
-        setSubmitted(true);
-        setMessage(data.message || 'Successfully joined the waitlist!');
-      } else {
-        setError(data.error || 'Failed to join waitlist. Please try again.');
-      }
-    } catch {
-      setError('An unexpected error occurred. Please try again.');
-    } finally {
-      setSubmitting(false);
-    }
+  const copyDockerCommand = async () => {
+    await navigator.clipboard.writeText(DOCKER_COMMAND);
+    setDockerCopied(true);
+    window.setTimeout(() => setDockerCopied(false), 1800);
   };
 
   return (
@@ -65,7 +41,7 @@ export default function Home() {
               className="text-xs bg-slate-900 border border-slate-800 text-slate-300 px-3 py-1.5 rounded-full hover:border-yellow-500/30 transition font-mono flex items-center space-x-2"
             >
               <span className="h-1.5 w-1.5 rounded-full bg-green-400 animate-pulse"></span>
-              <span>Telemetry: v1.3.1</span>
+              <span>Version status</span>
             </a>
           </div>
         </div>
@@ -85,49 +61,42 @@ export default function Home() {
               LLM API Streams
             </span>
           </h1>
-          <p className="text-lg sm:text-xl text-slate-400 leading-relaxed max-w-2xl mx-auto">
-            Kilovolt is an ultra-fast, zero-config reverse proxy that intercepts, tokenizes, and terminates AI streaming queries the millisecond they cross your budget.
-          </p>
-
-          {/* Waitlist Form Section */}
-          <div className="max-w-md mx-auto space-y-4">
-            {!submitted ? (
-              <form onSubmit={handleJoinWaitlist} className="flex flex-col sm:flex-row items-center gap-3">
-                <input
-                  type="email"
-                  placeholder="Enter your work email"
-                  required
-                  value={email}
-                  onChange={(e) => setEmail(e.target.value)}
-                  disabled={submitting}
-                  className="w-full px-4 py-3 bg-slate-900/60 border border-slate-800 rounded-xl focus:outline-none focus:border-yellow-500 text-slate-100 placeholder:text-slate-500 font-mono text-sm transition"
-                />
-                <button
-                  type="submit"
-                  disabled={submitting}
-                  className="w-full sm:w-auto px-6 py-3 bg-gradient-to-r from-yellow-500 to-amber-500 hover:from-yellow-400 hover:to-amber-400 text-slate-950 font-bold rounded-xl transition duration-200 transform active:scale-95 disabled:opacity-50 text-sm whitespace-nowrap cursor-pointer shadow-lg shadow-yellow-500/10"
-                >
-                  {submitting ? 'Joining...' : 'Join Waitlist'}
-                </button>
-              </form>
-            ) : (
-              <div className="p-4 bg-emerald-500/10 border border-emerald-500/25 rounded-xl text-emerald-400 text-sm font-medium">
-                🎉 {message}
-              </div>
-            )}
-            {error && (
-              <p className="text-red-400 text-xs font-mono">{error}</p>
-            )}
-            <div className="pt-2">
-              <a 
-                href="https://github.com/ytp101/kilovolt#readme"
-                target="_blank"
-                rel="noreferrer"
-                className="text-xs text-slate-400 hover:text-yellow-400 underline decoration-slate-800 hover:decoration-yellow-500 transition font-medium"
-              >
-                Or read the self-hosted setup docs &rarr;
-              </a>
+          <div className="max-w-3xl mx-auto overflow-hidden rounded-2xl border border-yellow-500/30 bg-slate-900/70 text-left shadow-2xl shadow-yellow-500/5">
+            <div className="flex items-center justify-between border-b border-slate-800 px-4 py-3 text-xs font-semibold uppercase tracking-wider text-slate-400">
+              <span>Run with Docker</span>
+              <span className="text-emerald-400">localhost only</span>
             </div>
+            <div className="flex flex-col gap-3 p-4 sm:flex-row sm:items-center">
+              <code className="min-w-0 flex-1 overflow-x-auto whitespace-nowrap font-mono text-sm text-slate-100">
+                {DOCKER_COMMAND}
+              </code>
+              <button
+                type="button"
+                onClick={copyDockerCommand}
+                className="shrink-0 rounded-lg border border-slate-700 bg-slate-800 px-4 py-2 text-sm font-bold text-slate-100 transition hover:border-yellow-500/50 hover:text-yellow-300 focus:outline-none focus:ring-2 focus:ring-yellow-400 cursor-pointer"
+                aria-live="polite"
+                aria-label={dockerCopied ? 'Docker command copied' : 'Copy Docker command'}
+              >
+                {dockerCopied ? 'Copied' : 'Copy'}
+              </button>
+            </div>
+          </div>
+
+          <div className="mx-auto max-w-2xl space-y-3">
+            <p className="text-lg text-slate-300 sm:text-xl">
+              Run Kilovolt locally, then open the URL printed in your terminal.
+            </p>
+            <p className="text-sm leading-relaxed text-slate-500">
+              No Git clone, Cargo, Docker Compose, or <code className="text-slate-300">.env</code> is required to evaluate the gateway.
+            </p>
+            <a
+              href="https://github.com/ytp101/kilovolt#readme"
+              target="_blank"
+              rel="noreferrer"
+              className="inline-block text-sm font-medium text-slate-400 underline decoration-slate-700 transition hover:text-yellow-400 hover:decoration-yellow-500"
+            >
+              Read the self-hosted documentation &rarr;
+            </a>
           </div>
         </section>
 

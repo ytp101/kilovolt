@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <link rel="icon" href="data:,">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%23080b12'/%3E%3Cpath d='M36 4 14 36h16l-2 24 22-34H34z' fill='%23f7c948'/%3E%3C/svg%3E">
   <title>Set up Kilovolt</title>
   <style>{{APP_CSS}}</style>
 </head>
@@ -18,23 +18,25 @@
       </ol>
 
       <h1 id="setup-heading">Connect your OpenAI account</h1>
-      <p class="lead">Add your OpenAI API key. Kilovolt will generate a separate gateway key for your backend.</p>
+      <p class="lead">Add your OpenAI API key to configure this temporary local evaluation.</p>
       {{SETUP_ERROR}}
 
       <form action="/setup" method="post" autocomplete="off">
-        <label class="field-label" for="provider-api-key">OpenAI API key</label>
-        <a class="key-link" href="https://platform.openai.com/api-keys" target="_blank" rel="noopener noreferrer">Create or manage an OpenAI API key ↗</a>
+        <div class="field-label-row">
+          <label class="field-label" for="provider-api-key">OpenAI API key</label>
+          <a class="key-link" href="https://platform.openai.com/api-keys" target="_blank" rel="noopener noreferrer">Create or manage key ↗</a>
+        </div>
         <div class="input-row">
           <input id="provider-api-key" name="provider_api_key" type="password" placeholder="sk-..." required autofocus spellcheck="false" autocomplete="off">
           <button id="toggle-provider-key" class="input-action" type="button" aria-controls="provider-api-key" aria-pressed="false">Show</button>
         </div>
-        <span class="hint">Stored only in this running Kilovolt process and used only for upstream requests.</span>
+        <span class="hint">Used only for upstream OpenAI requests from this running Kilovolt process.</span>
 
         <details class="secondary-options">
           <summary>
             <span class="summary-title">
               <strong>Customize spending limits</strong>
-              <span>Optional — evaluation defaults are already set</span>
+              <span>Defaults: $10 project · $1 per user</span>
             </span>
           </summary>
           <div class="details-body">

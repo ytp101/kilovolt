@@ -693,7 +693,7 @@ async fn main() {
     // Build the Axum Router
     let app = Router::new()
         .route("/", get(get_root))
-        .route("/setup", post(post_setup))
+        .route("/setup", get(get_root).post(post_setup))
         .route("/evaluation/test", post(post_evaluation_test))
         .route("/evaluation/budgets", post(post_evaluation_budgets))
         .route("/health", get(health_check))
@@ -713,8 +713,16 @@ async fn main() {
     };
     info!("Kilovolt listening on http://{}", addr);
     if browser_setup_mode {
+        let dashboard_url = format!("http://127.0.0.1:{port}");
         println!(
-            "Kilovolt is ready.\n\nOpen:\nhttp://127.0.0.1:{port}\n\nEvaluation mode: configuration and calculated spend are temporary."
+            "\n╭──────────────────────────────────────────────╮\n\
+             │  Kilovolt is ready                           │\n\
+             │                                              │\n\
+             │  Open the dashboard:                         │\n\
+             │  {dashboard_url:<44}│\n\
+             │                                              │\n\
+             │  Evaluation mode · Data resets on restart    │\n\
+             ╰──────────────────────────────────────────────╯"
         );
     }
 

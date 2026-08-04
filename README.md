@@ -15,19 +15,22 @@ docker run -p 127.0.0.1:8080:8080 yodsarun/kilovolt-proxy:latest
 Kilovolt prints:
 
 ```text
-Kilovolt is ready.
-
-Open:
-http://127.0.0.1:8080
-
-Evaluation mode: configuration and calculated spend are temporary.
+╭──────────────────────────────────────────────╮
+│  Kilovolt is ready                           │
+│                                              │
+│  Open the dashboard:                         │
+│  http://127.0.0.1:8080                       │
+│                                              │
+│  Evaluation mode · Data resets on restart    │
+╰──────────────────────────────────────────────╯
 ```
 
 Open [http://127.0.0.1:8080](http://127.0.0.1:8080).
 
-Paste your OpenAI API key, accept or change the spending limits, run the test
-request, and copy the generated integration example. No Git clone, Cargo,
-Docker Compose, `.env`, or manual secret generation is required.
+Paste your OpenAI API key, accept or change the spending limits, optionally run
+the test request, and open the dashboard's Connect your application panel. No
+Git clone, Cargo, Docker Compose, `.env`, or manual secret generation is
+required to reach the guided setup.
 
 > **Local evaluation only.** The command publishes the port only on host
 > loopback. Evaluation configuration and calculated spend are stored only in
@@ -51,26 +54,50 @@ successful test creates a visible calculated-spend record in the dashboard.
 
 ## Connect your application
 
-Use the generated Kilovolt gateway key as the SDK key and change only the base
-URL plus the trusted user header:
+Copy this `.env` file from the dashboard's expanded Connect your application
+panel:
+
+```dotenv
+KILOVOLT_API_KEY=kvlt_xxxxxxxxxxxxxxxxx
+KILOVOLT_BASE_URL=http://127.0.0.1:8080/v1
+```
+
+Do not commit `.env`. Install the Python dependencies:
+
+```bash
+pip install openai python-dotenv
+```
+
+Then use the environment variables from your trusted backend:
 
 ```python
+import os
+
+from dotenv import load_dotenv
 from openai import OpenAI
 
+load_dotenv()
+
 client = OpenAI(
-    base_url="http://127.0.0.1:8080/v1",
-    api_key="<generated-kilovolt-gateway-key>",
+    api_key=os.environ["KILOVOLT_API_KEY"],
+    base_url=os.environ["KILOVOLT_BASE_URL"],
 )
 
 response = client.chat.completions.create(
     model="gpt-4o-mini",
-    messages=[{"role": "user", "content": "Hello"}],
+    messages=[{"role": "user", "content": "Hello from Kilovolt"}],
     max_completion_tokens=100,
     extra_headers={
-        "X-User-ID": authenticated_user_id,
+        "X-User-ID": "local-test-user",
     },
 )
+
+# Optional: confirms the request reached OpenAI through Kilovolt.
+print(response.choices[0].message.content)
 ```
+
+`local-test-user` is for evaluation only. Replace it with the authenticated
+user ID from your backend.
 
 `X-User-ID` is a trusted accounting identity, not authentication. A trusted,
 authenticated backend must set or overwrite it from the authenticated session.
