@@ -109,7 +109,7 @@ jobs:
             --data-urlencode 'default_budget=1' \
             http://127.0.0.1:8080/setup)" = '422'
 
-          curl --silent --fail \
+          curl --silent --fail --location \
             --data-urlencode "provider_api_key=${provider_key}" \
             --data-urlencode 'project_budget=10' \
             --data-urlencode 'default_budget=1' \
