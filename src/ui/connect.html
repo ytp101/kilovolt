@@ -1,0 +1,123 @@
+<details id="connect-app" class="panel connect-panel" open>
+  <summary class="connect-summary">
+    <span>
+      <strong>Connect your application</strong>
+      <small>Copy the environment file and one working example</small>
+    </span>
+    <span class="badge success">Ready</span>
+  </summary>
+
+  <div class="connect-body">
+    <p class="muted">Use the Kilovolt gateway key from your trusted backend. Your OpenAI provider key stays inside Kilovolt.</p>
+
+    <div id="gateway-secret" class="secret-box" data-key="{{GATEWAY_KEY}}">
+      <div class="secret-label">Kilovolt gateway key</div>
+      <div class="secret-row">
+        <code id="gateway-display" class="secret-value" tabindex="0">{{MASKED_GATEWAY_KEY}}</code>
+        <div class="secret-actions">
+          <button id="copy-key-button" class="icon-button" type="button">Copy</button>
+          <button id="reveal-key-button" class="icon-button" type="button" aria-pressed="false">Reveal</button>
+        </div>
+      </div>
+      <span class="hint">Masked by default. Copy it into your backend environment, not application source code.</span>
+    </div>
+
+    <div class="tabs integration-tabs" role="tablist" aria-label="Integration example">
+      <button class="tab active" type="button" role="tab" aria-selected="true" aria-controls="env-panel" data-integration-tab="env-panel">.env</button>
+      <button class="tab" type="button" role="tab" aria-selected="false" aria-controls="python-panel" data-integration-tab="python-panel">Python</button>
+      <button class="tab" type="button" role="tab" aria-selected="false" aria-controls="typescript-panel" data-integration-tab="typescript-panel">TypeScript</button>
+      <button class="tab" type="button" role="tab" aria-selected="false" aria-controls="curl-panel" data-integration-tab="curl-panel">curl</button>
+    </div>
+
+    <section id="env-panel" class="code-panel" role="tabpanel">
+      <div class="code-heading"><strong>.env</strong><button class="icon-button" type="button" data-copy-kind="env">Copy</button></div>
+<pre><code id="env-code">KILOVOLT_API_KEY=kvlt_xxxxxxxxxxxxxxxxx
+KILOVOLT_BASE_URL=http://127.0.0.1:8080/v1</code></pre>
+      <p class="hint"><strong>Do not commit <code>.env</code>.</strong> The copy action inserts your real gateway key.</p>
+    </section>
+
+    <section id="python-panel" class="code-panel" role="tabpanel" hidden>
+      <div class="dependency-card">
+        <div><span>Python dependencies</span><code id="python-dependencies">pip install openai python-dotenv</code></div>
+        <button class="icon-button" type="button" data-copy-target="python-dependencies">Copy</button>
+      </div>
+      <div class="code-heading"><strong>Python</strong><button class="icon-button" type="button" data-copy-target="python-code">Copy</button></div>
+<pre><code id="python-code">import os
+
+from dotenv import load_dotenv
+from openai import OpenAI
+
+load_dotenv()
+
+client = OpenAI(
+    api_key=os.environ["KILOVOLT_API_KEY"],
+    base_url=os.environ["KILOVOLT_BASE_URL"],
+)
+
+response = client.chat.completions.create(
+    model="gpt-4o-mini",
+    messages=[{"role": "user", "content": "Hello from Kilovolt"}],
+    max_completion_tokens=100,
+    extra_headers={
+        "X-User-ID": "local-test-user",
+    },
+)
+
+# Optional: confirms the request reached OpenAI through Kilovolt.
+print(response.choices[0].message.content)</code></pre>
+      <p class="hint"><code>local-test-user</code> is for evaluation only. Replace it with the authenticated user ID from your backend.</p>
+    </section>
+
+    <section id="typescript-panel" class="code-panel" role="tabpanel" hidden>
+      <div class="dependency-card">
+        <div><span>TypeScript dependencies</span><code id="typescript-dependencies">npm install openai dotenv</code></div>
+        <button class="icon-button" type="button" data-copy-target="typescript-dependencies">Copy</button>
+      </div>
+      <div class="code-heading"><strong>TypeScript</strong><button class="icon-button" type="button" data-copy-target="typescript-code">Copy</button></div>
+<pre><code id="typescript-code">import "dotenv/config";
+import OpenAI from "openai";
+
+const client = new OpenAI({
+  apiKey: process.env.KILOVOLT_API_KEY,
+  baseURL: process.env.KILOVOLT_BASE_URL,
+});
+
+const response = await client.chat.completions.create(
+  {
+    model: "gpt-4o-mini",
+    messages: [{ role: "user", content: "Hello from Kilovolt" }],
+    max_completion_tokens: 100,
+  },
+  { headers: { "X-User-ID": "local-test-user" } },
+);
+
+console.log(response.choices[0].message.content);</code></pre>
+      <p class="hint"><code>local-test-user</code> is for evaluation only. Replace it with the authenticated user ID from your backend.</p>
+    </section>
+
+    <section id="curl-panel" class="code-panel" role="tabpanel" hidden>
+      <div class="code-heading"><strong>curl</strong><button class="icon-button" type="button" data-copy-target="curl-code">Copy</button></div>
+<pre><code id="curl-code">curl "$KILOVOLT_BASE_URL/chat/completions" \
+  -H "Authorization: Bearer $KILOVOLT_API_KEY" \
+  -H "Content-Type: application/json" \
+  -H "X-User-ID: local-test-user" \
+  -d '{"model":"gpt-4o-mini","messages":[{"role":"user","content":"Hello from Kilovolt"}],"max_completion_tokens":100}'</code></pre>
+      <p class="hint"><code>local-test-user</code> is for evaluation only. Replace it with the authenticated user ID from your backend.</p>
+    </section>
+
+    <div id="trusted-user-identity" class="trusted-identity">
+<pre aria-label="Trusted identity flow">Trusted backend
+  ├── Kilovolt gateway key
+  └── X-User-ID: user_123
+              ↓
+          Kilovolt</pre>
+      <div>
+        <strong><code>X-User-ID</code> tells Kilovolt which user should be charged.</strong>
+        <p>Your trusted backend must set or overwrite it after authenticating the user.</p>
+        <a href="/documentation#trusted-user-identity">Learn more ↗</a>
+      </div>
+    </div>
+
+    <div class="notice connect-watch"><strong>Run your application, then watch this page.</strong> Spend and recent transactions refresh automatically every three seconds.</div>
+  </div>
+</details>

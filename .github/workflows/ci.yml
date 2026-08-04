@@ -94,9 +94,9 @@ jobs:
           t1="$(date +%s%3N)"
           grep -Fq 'Continue to verification' "${setup_file}"
           test "$(curl --fail --silent http://127.0.0.1:8080/health)" = 'OK'
-          grep -Fxq 'Kilovolt is ready.' "${log_file}"
-          grep -Fxq 'http://127.0.0.1:8080' "${log_file}"
-          grep -Fxq 'Evaluation mode: configuration and calculated spend are temporary.' "${log_file}"
+          grep -Fq '│  Kilovolt is ready' "${log_file}"
+          grep -Fq '│  http://127.0.0.1:8080' "${log_file}"
+          grep -Fq '│  Evaluation mode · Data resets on restart' "${log_file}"
 
           test "$(curl --silent --output /dev/null --write-out '%{http_code}' \
             --data-urlencode 'provider_api_key=' \

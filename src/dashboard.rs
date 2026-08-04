@@ -1,4 +1,4 @@
-use crate::config::{AppState, RecentRequest, secrets_match};
+use crate::config::{AppState, EvaluationTestResult, RecentRequest, secrets_match};
 use crate::proxy::chat_completions_proxy;
 use axum::{
     Form, Json,
@@ -17,6 +17,7 @@ const APP_CSS: &str = include_str!("ui/app.css");
 const SETUP_HTML: &str = include_str!("ui/setup.html");
 const ONBOARDING_HTML: &str = include_str!("ui/onboarding.html");
 const DASHBOARD_HTML: &str = include_str!("ui/dashboard.html");
+const CONNECT_HTML: &str = include_str!("ui/connect.html");
 const DOCUMENTATION_HTML: &str = include_str!("ui/documentation.html");
 const EVALUATION_USER_ID: &str = "kilovolt-evaluation";
 
@@ -83,8 +84,13 @@ struct EvaluationTestPayload {
     message: String,
     model: String,
     tokens: usize,
+    input_tokens: usize,
+    output_tokens: usize,
+    output_text: String,
     spend_usd: f64,
     latency_ms: u64,
+    project_budget_usd: f64,
+    project_remaining_usd: f64,
     project_calculated_spend_usd: f64,
     user_calculated_spend_usd: f64,
 }
@@ -349,6 +355,10 @@ fn format_budget(value: f64) -> String {
     format!("${value:.2}")
 }
 
+fn format_remaining(value: f64) -> String {
+    format!("${}", format_decimal(value, 7))
+}
+
 fn format_latency(milliseconds: u64) -> String {
     if milliseconds >= 1_000 {
         format!("{} s", format_decimal(milliseconds as f64 / 1_000.0, 2))
@@ -372,28 +382,46 @@ fn render_onboarding(state: &AppState) -> String {
         .evaluation_setup_snapshot()
         .expect("onboarding requires completed evaluation setup");
     let (project_budget, user_budget) = setup.budgets();
-    let result = state
-        .evaluation_test_succeeded()
-        .then(|| latest_evaluation_request(state))
-        .flatten();
+    let result = state.evaluation_test_result();
     let success_hidden = if result.is_some() { "" } else { "hidden" };
     let verify_action_hidden = if result.is_some() { "hidden" } else { "" };
+    let result_output_hidden = if result
+        .as_ref()
+        .is_some_and(|result| !result.output_text.is_empty())
+    {
+        ""
+    } else {
+        "hidden"
+    };
     let result_model = result
         .as_ref()
-        .map(|request| escape_html(&request.model))
+        .map(|result| escape_html(&result.model))
         .unwrap_or_default();
-    let result_tokens = result
+    let result_input_tokens = result
         .as_ref()
-        .map(|request| request.tokens.to_string())
+        .map(|result| result.input_tokens.to_string())
+        .unwrap_or_default();
+    let result_output_tokens = result
+        .as_ref()
+        .map(|result| result.output_tokens.to_string())
+        .unwrap_or_default();
+    let result_output = result
+        .as_ref()
+        .map(|result| escape_html(&result.output_text))
         .unwrap_or_default();
     let result_spend = result
         .as_ref()
-        .map(|request| format_spend(request.cost))
+        .map(|result| format_spend(result.spend_usd))
         .unwrap_or_default();
     let result_latency = result
         .as_ref()
-        .map(|request| format_latency(request.duration_ms))
+        .map(|result| format_latency(result.latency_ms))
         .unwrap_or_default();
+    let result_project_spend = result
+        .as_ref()
+        .map(|result| result.project_calculated_spend_usd)
+        .unwrap_or_default();
+    let result_project_remaining = (project_budget - result_project_spend).max(0.0);
 
     render_template(ONBOARDING_HTML)
         .replace(
@@ -414,43 +442,62 @@ fn render_onboarding(state: &AppState) -> String {
         )
         .replace("{{VERIFY_ACTION_HIDDEN}}", verify_action_hidden)
         .replace("{{SUCCESS_HIDDEN}}", success_hidden)
+        .replace("{{RESULT_OUTPUT_HIDDEN}}", result_output_hidden)
         .replace("{{RESULT_MODEL}}", &result_model)
-        .replace("{{RESULT_TOKENS}}", &result_tokens)
+        .replace("{{RESULT_INPUT_TOKENS}}", &result_input_tokens)
+        .replace("{{RESULT_OUTPUT_TOKENS}}", &result_output_tokens)
+        .replace("{{RESULT_OUTPUT}}", &result_output)
         .replace("{{RESULT_SPEND}}", &result_spend)
         .replace("{{RESULT_LATENCY}}", &result_latency)
-        .replace("{{GATEWAY_KEY}}", &escape_html(setup.gateway_key()))
         .replace(
-            "{{MASKED_GATEWAY_KEY}}",
-            &escape_html(&masked_gateway_key(setup.gateway_key())),
+            "{{RESULT_PROJECT_REMAINING}}",
+            &format_remaining(result_project_remaining),
         )
+        .replace(
+            "{{RESULT_PROJECT_SPEND}}",
+            &format_spend(result_project_spend),
+        )
+        .replace(
+            "{{RESULT_PROJECT_SPEND_VALUE}}",
+            &result_project_spend.to_string(),
+        )
+        .replace("{{GATEWAY_KEY}}", &escape_html(setup.gateway_key()))
 }
 
 fn render_dashboard(state: &AppState) -> String {
-    let (brand_href, getting_started_nav, monitor_progress, edit_limits_link) =
-        if state.evaluation_mode() {
-            (
-                "/",
-                "<a href=\"/\">Getting started</a>",
-                r#"<ol class="progress" aria-label="Onboarding progress">
-              <li class="complete"><a href="/#configure">1. Configure ✓</a></li>
-              <li class="complete"><a href="/#verify">2. Verify ✓</a></li>
-              <li class="complete"><a href="/#connect">3. Connect ✓</a></li>
-            </ol>"#,
-                "· <a href=\"/#budget-editor\">Edit limits</a>",
-            )
-        } else {
-            ("/dashboard", "", "", "")
-        };
+    let (brand_href, secondary_nav, edit_limits_link, connect_panel) = if state.evaluation_mode() {
+        let setup = state
+            .evaluation_setup_snapshot()
+            .expect("evaluation dashboard requires completed setup");
+        let connect_panel = CONNECT_HTML
+            .replace("{{GATEWAY_KEY}}", &escape_html(setup.gateway_key()))
+            .replace(
+                "{{MASKED_GATEWAY_KEY}}",
+                &escape_html(&masked_gateway_key(setup.gateway_key())),
+            );
+        (
+            "/dashboard",
+            "<a href=\"/dashboard#transactions-heading\">Transactions</a>",
+            "· <a href=\"/#budget-editor\">Edit limits</a>",
+            connect_panel,
+        )
+    } else {
+        ("/dashboard", "", "", String::new())
+    };
     render_template(DASHBOARD_HTML)
         .replace("{{BRAND_HREF}}", brand_href)
-        .replace("{{GETTING_STARTED_NAV}}", getting_started_nav)
-        .replace("{{MONITOR_PROGRESS}}", monitor_progress)
+        .replace("{{GETTING_STARTED_NAV}}", secondary_nav)
+        .replace("{{MONITOR_PROGRESS}}", "")
         .replace("{{EDIT_LIMITS_LINK}}", edit_limits_link)
+        .replace("{{CONNECT_PANEL}}", &connect_panel)
 }
 
 fn render_documentation(state: &AppState) -> String {
     let (brand_href, getting_started_nav) = if state.evaluation_mode() {
-        ("/", "<a href=\"/\">Getting started</a>")
+        (
+            "/dashboard",
+            "<a href=\"/dashboard#transactions-heading\">Transactions</a>",
+        )
     } else {
         ("/dashboard", "")
     };
@@ -464,19 +511,32 @@ fn evaluation_payload(
     ok: bool,
     status: StatusCode,
     message: String,
-    request: Option<&RecentRequest>,
 ) -> EvaluationTestPayload {
+    let result = state.evaluation_test_result();
+    let (project_budget, _) = state.effective_budgets();
+    let project_calculated_spend_usd = state.budget_ledger.project_snapshot().committed_spend;
     EvaluationTestPayload {
         ok,
         status: status.as_u16(),
         message,
-        model: request
-            .map(|record| record.model.clone())
+        model: result
+            .as_ref()
+            .map(|result| result.model.clone())
             .unwrap_or_default(),
-        tokens: request.map_or(0, |record| record.tokens),
-        spend_usd: request.map_or(0.0, |record| record.cost),
-        latency_ms: request.map_or(0, |record| record.duration_ms),
-        project_calculated_spend_usd: state.budget_ledger.project_snapshot().committed_spend,
+        tokens: result
+            .as_ref()
+            .map_or(0, |result| result.input_tokens + result.output_tokens),
+        input_tokens: result.as_ref().map_or(0, |result| result.input_tokens),
+        output_tokens: result.as_ref().map_or(0, |result| result.output_tokens),
+        output_text: result
+            .as_ref()
+            .map(|result| result.output_text.clone())
+            .unwrap_or_default(),
+        spend_usd: result.as_ref().map_or(0.0, |result| result.spend_usd),
+        latency_ms: result.as_ref().map_or(0, |result| result.latency_ms),
+        project_budget_usd: project_budget,
+        project_remaining_usd: (project_budget - project_calculated_spend_usd).max(0.0),
+        project_calculated_spend_usd,
         user_calculated_spend_usd: state
             .budget_ledger
             .user_snapshot(EVALUATION_USER_ID)
@@ -528,7 +588,6 @@ pub async fn post_evaluation_test(
                     false,
                     StatusCode::UNAUTHORIZED,
                     "Kilovolt gateway key authentication failed.".to_string(),
-                    None,
                 )),
             )
                 .into_response(),
@@ -572,7 +631,6 @@ pub async fn post_evaluation_test(
                         StatusCode::BAD_GATEWAY,
                         "The test response could not be read safely. Check the provider connection and try again."
                             .to_string(),
-                        None,
                     )),
                 )
                     .into_response(),
@@ -581,9 +639,6 @@ pub async fn post_evaluation_test(
     };
 
     let ok = status.is_success();
-    if ok {
-        state.mark_evaluation_test_succeeded();
-    }
     let recorded_request = latest_evaluation_request(&state);
     let message = if ok {
         "Kilovolt is working. You can now connect your application.".to_string()
@@ -591,7 +646,13 @@ pub async fn post_evaluation_test(
         actionable_test_error(status)
     };
 
-    let mut payload = evaluation_payload(&state, ok, status, message, recorded_request.as_ref());
+    let mut payload = evaluation_payload(&state, ok, status, message);
+    if let Some(record) = recorded_request {
+        payload.model = record.model;
+        payload.tokens = record.tokens;
+        payload.spend_usd = record.cost;
+        payload.latency_ms = record.duration_ms;
+    }
     if ok
         && let Ok(provider_response) = serde_json::from_slice::<serde_json::Value>(&response_bytes)
     {
@@ -608,6 +669,37 @@ pub async fn post_evaluation_test(
         {
             payload.tokens = tokens;
         }
+        if let Some(tokens) = provider_response
+            .pointer("/usage/prompt_tokens")
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|tokens| usize::try_from(tokens).ok())
+        {
+            payload.input_tokens = tokens;
+        }
+        if let Some(tokens) = provider_response
+            .pointer("/usage/completion_tokens")
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|tokens| usize::try_from(tokens).ok())
+        {
+            payload.output_tokens = tokens;
+        }
+        if let Some(output_text) = provider_response
+            .pointer("/choices/0/message/content")
+            .and_then(serde_json::Value::as_str)
+        {
+            payload.output_text = output_text.to_string();
+        }
+    }
+    if ok {
+        state.save_evaluation_test_result(EvaluationTestResult {
+            model: payload.model.clone(),
+            input_tokens: payload.input_tokens,
+            output_tokens: payload.output_tokens,
+            output_text: payload.output_text.clone(),
+            spend_usd: payload.spend_usd,
+            latency_ms: payload.latency_ms,
+            project_calculated_spend_usd: payload.project_calculated_spend_usd,
+        });
     }
 
     with_no_store((status, Json(payload)).into_response())
@@ -668,7 +760,7 @@ pub async fn post_setup(State(state): State<AppState>, Form(form): Form<SetupFor
         return StatusCode::NOT_FOUND.into_response();
     }
 
-    with_no_store(Html(render_onboarding(&state)).into_response())
+    with_no_store((StatusCode::SEE_OTHER, [(header::LOCATION, "/#verify")]).into_response())
 }
 
 /// Updates both evaluation budget limits together without changing recorded spend.
@@ -985,7 +1077,7 @@ mod tests {
             }),
         )
         .await;
-        assert_eq!(configured.status(), StatusCode::OK);
+        assert_eq!(configured.status(), StatusCode::SEE_OTHER);
         assert_eq!(
             configured
                 .headers()
@@ -993,6 +1085,15 @@ mod tests {
                 .and_then(|value| value.to_str().ok()),
             Some("no-store")
         );
+        assert_eq!(
+            configured
+                .headers()
+                .get(header::LOCATION)
+                .and_then(|value| value.to_str().ok()),
+            Some("/#verify")
+        );
+        let configured = get_root(State(state.clone())).await;
+        assert_eq!(configured.status(), StatusCode::OK);
         let configured_body = configured.into_body().collect().await.unwrap().to_bytes();
         let configured_html = String::from_utf8_lossy(&configured_body);
         assert!(!configured_html.contains(provider_key));
@@ -1002,9 +1103,11 @@ mod tests {
         assert!(configured_html.contains("id=\"configure-stage\""));
         assert!(configured_html.contains("data-stage-target=\"configure\""));
         assert!(configured_html.contains("data-stage-target=\"verify\""));
-        assert!(configured_html.contains("data-stage-target=\"connect\" disabled"));
+        assert!(configured_html.contains("href=\"/dashboard#connect-app\""));
+        assert!(configured_html.contains("Skip and connect app"));
         assert!(configured_html.contains("let verificationComplete = false;"));
         assert!(!configured_html.contains("{{VERIFICATION_COMPLETE}}"));
+        assert!(!configured_html.contains("href=\"data:,\""));
         assert!(configured_html.contains("href=\"/documentation\""));
 
         let setup = state.evaluation_setup_snapshot().unwrap();
@@ -1025,14 +1128,23 @@ mod tests {
         assert!(dashboard_html.contains("Monitor spending"));
         assert!(dashboard_html.contains("Accepted"));
         assert!(dashboard_html.contains("Blocked"));
-        assert!(dashboard_html.contains("href=\"/#configure\""));
-        assert!(dashboard_html.contains("href=\"/#verify\""));
-        assert!(dashboard_html.contains("href=\"/#connect\""));
+        assert!(dashboard_html.contains("Connect your application"));
+        assert!(dashboard_html.contains("KILOVOLT_BASE_URL=http://127.0.0.1:8080/v1"));
+        assert!(dashboard_html.contains("pip install openai python-dotenv"));
+        assert!(dashboard_html.contains("load_dotenv()"));
+        assert!(dashboard_html.contains("data-copy-target=\"python-code\""));
+        assert!(dashboard_html.contains("X-User-ID</code> tells Kilovolt"));
+        assert!(dashboard_html.contains("href=\"/documentation#trusted-user-identity\""));
         assert!(
             dashboard_html.find("Project spend").unwrap()
                 < dashboard_html.find("System health").unwrap()
         );
-        assert!(!dashboard_html.contains(setup.gateway_key()));
+        assert!(
+            dashboard_html.find("Connect your application").unwrap()
+                < dashboard_html.find("id=\"transactions-heading\"").unwrap()
+        );
+        assert_eq!(dashboard_html.matches(setup.gateway_key()).count(), 1);
+        assert!(!dashboard_html.contains(provider_key));
 
         let closed = post_setup(
             State(state.clone()),
@@ -1209,8 +1321,13 @@ mod tests {
         assert_eq!(payload["ok"], true);
         assert_eq!(payload["model"], "gpt-4o-mini-2024-07-18");
         assert_eq!(payload["tokens"], 12);
+        assert_eq!(payload["input_tokens"], 8);
+        assert_eq!(payload["output_tokens"], 4);
+        assert_eq!(payload["output_text"], "Kilovolt is working.");
+        assert_eq!(payload["project_budget_usd"], 10.0);
         assert!(payload["spend_usd"].as_f64().unwrap() > 0.0);
         assert!(payload["project_calculated_spend_usd"].as_f64().unwrap() > 0.0);
+        assert!(payload["project_remaining_usd"].as_f64().unwrap() < 10.0);
         assert!(state.evaluation_test_succeeded());
         assert!(
             state
@@ -1230,6 +1347,8 @@ mod tests {
         let onboarding_html = String::from_utf8_lossy(&onboarding_body);
         assert!(onboarding_html.contains("let verificationComplete = true;"));
         assert!(onboarding_html.contains("Kilovolt is working"));
+        assert!(onboarding_html.contains("8 / 4 tokens"));
+        assert!(onboarding_html.contains("Request succeeded"));
         server.abort();
     }
 

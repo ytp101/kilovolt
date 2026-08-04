@@ -45,9 +45,21 @@ impl EvaluationSetup {
     }
 }
 
+#[derive(Clone)]
+pub struct EvaluationTestResult {
+    pub model: String,
+    pub input_tokens: usize,
+    pub output_tokens: usize,
+    pub output_text: String,
+    pub spend_usd: f64,
+    pub latency_ms: u64,
+    pub project_calculated_spend_usd: f64,
+}
+
 pub struct EvaluationSetupState {
     configured: RwLock<Option<EvaluationSetup>>,
     test_succeeded: AtomicBool,
+    last_test_result: RwLock<Option<EvaluationTestResult>>,
 }
 
 impl EvaluationSetupState {
@@ -55,6 +67,7 @@ impl EvaluationSetupState {
         Self {
             configured: RwLock::new(None),
             test_succeeded: AtomicBool::new(false),
+            last_test_result: RwLock::new(None),
         }
     }
 
@@ -102,6 +115,15 @@ impl EvaluationSetupState {
 
     pub fn mark_test_succeeded(&self) {
         self.test_succeeded.store(true, Ordering::Release);
+    }
+
+    pub fn save_test_result(&self, result: EvaluationTestResult) {
+        *self.last_test_result.write().unwrap() = Some(result);
+        self.mark_test_succeeded();
+    }
+
+    pub fn test_result(&self) -> Option<EvaluationTestResult> {
+        self.last_test_result.read().unwrap().clone()
     }
 
     pub fn test_succeeded(&self) -> bool {
@@ -216,16 +238,22 @@ impl AppState {
             .is_some_and(|setup| setup.update_budgets(project_budget, default_budget))
     }
 
-    pub fn mark_evaluation_test_succeeded(&self) {
-        if let Some(setup) = &self.evaluation_setup {
-            setup.mark_test_succeeded();
-        }
-    }
-
     pub fn evaluation_test_succeeded(&self) -> bool {
         self.evaluation_setup
             .as_ref()
             .is_some_and(|setup| setup.test_succeeded())
+    }
+
+    pub fn save_evaluation_test_result(&self, result: EvaluationTestResult) {
+        if let Some(setup) = &self.evaluation_setup {
+            setup.save_test_result(result);
+        }
+    }
+
+    pub fn evaluation_test_result(&self) -> Option<EvaluationTestResult> {
+        self.evaluation_setup
+            .as_ref()
+            .and_then(|setup| setup.test_result())
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -369,7 +397,7 @@ pub(crate) fn test_evaluation_state(port: u16) -> AppState {
 
 #[cfg(test)]
 mod tests {
-    use super::{secrets_match, test_evaluation_state, test_state};
+    use super::{EvaluationTestResult, secrets_match, test_evaluation_state, test_state};
     use axum::{Json, Router, routing::post};
     use serde_json::Value;
     use std::time::Duration;
@@ -419,8 +447,22 @@ mod tests {
             .expect("evaluation setup should remain configured");
         assert_eq!(updated.provider_api_key(), "provider-secret");
         assert_eq!(updated.gateway_key(), "gateway-secret");
-        state.mark_evaluation_test_succeeded();
+        state.save_evaluation_test_result(EvaluationTestResult {
+            model: "gpt-4o-mini".to_string(),
+            input_tokens: 8,
+            output_tokens: 4,
+            output_text: "Kilovolt is working.".to_string(),
+            spend_usd: 0.000_006,
+            latency_ms: 250,
+            project_calculated_spend_usd: 0.000_006,
+        });
         assert!(state.evaluation_test_succeeded());
+        let test_result = state
+            .evaluation_test_result()
+            .expect("successful evaluation result should be retained in memory");
+        assert_eq!(test_result.input_tokens, 8);
+        assert_eq!(test_result.output_tokens, 4);
+        assert_eq!(test_result.output_text, "Kilovolt is working.");
     }
 
     async fn telemetry_receiver(

@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <link rel="icon" href="data:,">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%23080b12'/%3E%3Cpath d='M36 4 14 36h16l-2 24 22-34H34z' fill='%23f7c948'/%3E%3C/svg%3E">
   <title>Documentation · Kilovolt</title>
   <style>{{APP_CSS}}</style>
 </head>
@@ -12,8 +12,8 @@
     <nav class="shell nav" aria-label="Primary navigation">
       <a class="brand" href="{{BRAND_HREF}}">⚡ Kilovolt</a>
       <div class="nav-links">
-        {{GETTING_STARTED_NAV}}
         <a href="/dashboard">Dashboard</a>
+        {{GETTING_STARTED_NAV}}
         <a class="active" href="/documentation" aria-current="page">Documentation</a>
       </div>
     </nav>
@@ -29,7 +29,7 @@
     <section class="card docs-section" aria-labelledby="before-heading">
       <h2 id="before-heading">Before you start</h2>
       <ol class="docs-steps">
-        <li><strong>Copy your gateway key</strong><span>Get it from the Connect stage under Getting started.</span></li>
+        <li><strong>Copy your gateway key</strong><span>Get it from the expanded Connect your application panel on the dashboard.</span></li>
         <li><strong>Set one environment variable</strong><code>export KILOVOLT_API_KEY="your-kilovolt-gateway-key"</code></li>
         <li><strong>Use your trusted user identity</strong><span>Derive the user ID only after your backend authenticates the user.</span></li>
       </ol>
@@ -106,7 +106,7 @@ console.log(response.choices[0].message.content);</code></pre>
   }'</code></pre>
       </div>
 
-      <details class="eval-notice trusted-note">
+      <details id="trusted-user-identity" class="eval-notice trusted-note">
         <summary><strong>Why must my backend set <code>X-User-ID</code>?</strong></summary>
         <p><code>X-User-ID</code> is accounting identity, not authentication. Your trusted backend must set or overwrite it after authenticating the user; browsers and mobile clients must not choose arbitrary identities.</p>
       </details>
