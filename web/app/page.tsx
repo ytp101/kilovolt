@@ -62,9 +62,8 @@ export default function Home() {
             </span>
           </h1>
           <div className="max-w-3xl mx-auto overflow-hidden rounded-2xl border border-yellow-500/30 bg-slate-900/70 text-left shadow-2xl shadow-yellow-500/5">
-            <div className="flex items-center justify-between border-b border-slate-800 px-4 py-3 text-xs font-semibold uppercase tracking-wider text-slate-400">
+            <div className="flex items-center border-b border-slate-800 px-4 py-3 text-xs font-semibold uppercase tracking-wider text-slate-400">
               <span>Run with Docker</span>
-              <span className="text-emerald-400">localhost only</span>
             </div>
             <div className="flex flex-col gap-3 p-4 sm:flex-row sm:items-center">
               <code className="min-w-0 flex-1 overflow-x-auto whitespace-nowrap font-mono text-sm text-slate-100">
