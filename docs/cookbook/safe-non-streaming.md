@@ -33,7 +33,7 @@ curl --fail \
   -H 'X-User-ID: authenticated-user-123' \
   -H "X-Kilovolt-Key: ${KILOVOLT_PROXY_TOKEN}" \
   --data '{
-    "model":"gpt-4o-mini",
+    "model":"gpt-4o-mini-2024-07-18",
     "messages":[{"role":"user","content":"Reply briefly."}],
     "stream":false,
     "max_completion_tokens":100

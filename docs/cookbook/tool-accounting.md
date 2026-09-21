@@ -2,7 +2,7 @@
 
 ## Goal
 
-Use the documented OpenAI-compatible tool/function surface without silently
+Use the documented OpenAI Chat Completions tool/function surface without silently
 omitting known billable request or output fields.
 
 ## Request flow
@@ -34,7 +34,7 @@ curl --no-buffer --fail \
   -H 'Content-Type: application/json' \
   -H 'X-User-ID: authenticated-user-123' \
   --data '{
-    "model":"gpt-4o-mini",
+    "model":"gpt-4o-mini-2024-07-18",
     "stream":true,
     "messages":[{"role":"user","content":"Weather in Bangkok?"}],
     "tools":[{"type":"function","function":{"name":"forecast","parameters":{"type":"object","properties":{"city":{"type":"string"}}}}}]
@@ -71,4 +71,4 @@ finish reason, and logprobs is passed without being treated as generated text.
 
 Unknown generated fields, unsupported structured content types, and malformed
 tool/function objects produce an accounting-protocol failure. Provider-native
-APIs outside the documented OpenAI-compatible shape are not covered.
+APIs outside the documented OpenAI Chat Completions shape are not covered.

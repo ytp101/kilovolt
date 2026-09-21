@@ -107,7 +107,7 @@ test "$unauthenticated_status" = "401"
 curl --fail --silent --user "kilovolt:${dashboard_token}" \
   "http://127.0.0.1:${port}/api/stats" | grep -q '"multi_instance_safe":false'
 
-stream_payload='{"model":"gpt-4o-mini","messages":[{"role":"user","content":"smoke"}],"stream":true}'
+stream_payload='{"model":"gpt-4o-mini-2024-07-18","messages":[{"role":"user","content":"smoke"}],"stream":true}'
 proxy_unauthenticated_status="$(
   curl --silent --output /dev/null --write-out '%{http_code}' \
     -H 'Authorization: Bearer mock-key' \
@@ -128,7 +128,7 @@ curl --fail --silent --no-buffer \
   --data "$stream_payload" \
   "http://127.0.0.1:${port}/v1/chat/completions" | grep -q 'data: \[DONE\]'
 
-json_payload='{"model":"gpt-4o-mini","messages":[{"role":"user","content":"smoke"}],"stream":false}'
+json_payload='{"model":"gpt-4o-mini-2024-07-18","messages":[{"role":"user","content":"smoke"}],"stream":false}'
 curl --fail --silent \
   -H 'Authorization: Bearer mock-key' \
   -H 'Content-Type: application/json' \

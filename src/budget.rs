@@ -6,7 +6,6 @@ use std::time::Instant;
 
 use axum::body::Bytes;
 use futures_util::stream::Stream;
-use tiktoken_rs::bpe_for_model;
 use tracing::{error, info, warn};
 
 use crate::config::AppState;
@@ -86,16 +85,13 @@ pub struct StreamMonitor<S> {
     pub pricing: ModelPricing,
     pub prompt_tokens: usize,
     pub prompt_cost: f64,
-    pub bpe: Option<&'static tiktoken_rs::CoreBPE>,
     pub total_spend: f64,
     pub user_budget_limit: f64,
     pub output_tokens_count: usize,
     pub state: AppState,
-    pub is_gemini: bool,
     pub frame_buffer: Vec<u8>,
     pub pending_output: VecDeque<Bytes>,
     pub max_sse_frame_bytes: usize,
-    pub sent_done: bool,
     pub pipeline_id: Option<String>,
     terminal: Option<(u16, &'static str, bool)>,
 }
@@ -113,13 +109,8 @@ impl<S> StreamMonitor<S> {
         total_spend: f64,
         user_budget_limit: f64,
         state: AppState,
-        is_gemini: bool,
         pipeline_id: Option<String>,
     ) -> Self {
-        let bpe = bpe_for_model(&model)
-            .ok()
-            .or_else(|| bpe_for_model("gpt-4o").ok());
-
         Self {
             inner,
             start_time: Instant::now(),
@@ -132,16 +123,13 @@ impl<S> StreamMonitor<S> {
             pricing,
             prompt_tokens,
             prompt_cost,
-            bpe,
             total_spend,
             user_budget_limit,
             output_tokens_count: 0,
             max_sse_frame_bytes: state.max_sse_frame_bytes,
             state,
-            is_gemini,
             frame_buffer: Vec::new(),
             pending_output: VecDeque::new(),
-            sent_done: false,
             pipeline_id,
             terminal: None,
         }
@@ -163,20 +151,6 @@ impl<S> StreamMonitor<S> {
             .fetch_add(new_tokens, Ordering::Relaxed);
         self.total_spend = snapshot.user.total_spend;
         Ok(())
-    }
-
-    fn token_count(&self, text: &str) -> usize {
-        self.bpe.as_ref().map_or_else(
-            || text.len().div_ceil(4),
-            |bpe| bpe.encode_with_special_tokens(text).len(),
-        )
-    }
-
-    fn charge_text(&mut self, text: &str) -> Result<(), BudgetError> {
-        if text.is_empty() {
-            return Ok(());
-        }
-        self.try_charge_output_tokens(self.token_count(text))
     }
 
     fn mark_terminal(&mut self, status: u16, outcome: &'static str, is_cutoff: bool) {
@@ -242,7 +216,6 @@ impl<S> StreamMonitor<S> {
 
         let data = data_lines.join("\n");
         if data == "[DONE]" {
-            self.sent_done = true;
             self.pending_output.push_back(Bytes::from(frame));
             self.frame_buffer.clear();
             self.mark_terminal(200, "completed successfully", false);
@@ -256,66 +229,6 @@ impl<S> StreamMonitor<S> {
                 return;
             }
         };
-
-        if self.is_gemini {
-            let mut text_extracted = String::new();
-            let mut finish_reason = None;
-            if let Some(candidate) = value
-                .get("candidates")
-                .and_then(serde_json::Value::as_array)
-                .and_then(|candidates| candidates.first())
-            {
-                if let Some(parts) = candidate
-                    .get("content")
-                    .and_then(|content| content.get("parts"))
-                    .and_then(serde_json::Value::as_array)
-                {
-                    for part in parts {
-                        if let Some(text) = part.get("text").and_then(serde_json::Value::as_str) {
-                            text_extracted.push_str(text);
-                        }
-                    }
-                }
-                finish_reason = candidate
-                    .get("finishReason")
-                    .and_then(serde_json::Value::as_str)
-                    .map(str::to_ascii_lowercase);
-            }
-
-            if text_extracted.is_empty() && finish_reason.is_none() {
-                self.fail_protocol("Gemini SSE frame did not contain a supported candidate");
-                return;
-            }
-            if let Err(error) = self.charge_text(&text_extracted) {
-                warn!(
-                    user_id = %self.user_id,
-                    error = %error,
-                    "Budget rejected a Gemini output increment"
-                );
-                self.mark_terminal(429, "tripped mid-stream", true);
-                return;
-            }
-
-            let normalized_finish_reason = match finish_reason.as_deref() {
-                Some("stop" | "completed") => serde_json::Value::String("stop".to_string()),
-                Some(other) => serde_json::Value::String(other.to_string()),
-                None => serde_json::Value::Null,
-            };
-            let openai_chunk = serde_json::json!({
-                "id": format!("chatcmpl-{}", self.request_id),
-                "object": "chat.completion.chunk",
-                "model": self.model,
-                "choices": [{
-                    "index": 0,
-                    "delta": {"content": text_extracted},
-                    "logprobs": null,
-                    "finish_reason": normalized_finish_reason
-                }]
-            });
-            self.pending_output
-                .push_back(Bytes::from(format!("data: {openai_chunk}\n\n")));
-            return;
-        }
 
         let output_tokens = match streaming_output_tokens(&self.model, &value) {
             Ok(tokens) => tokens,
@@ -331,7 +244,7 @@ impl<S> StreamMonitor<S> {
                 project_budget_limit = %project_budget_limit,
                 user_budget_limit = %self.user_budget_limit,
                 error = %error,
-                "Budget rejected an OpenAI-compatible output increment"
+                "Budget rejected an OpenAI Chat Completions output increment"
             );
             self.mark_terminal(429, "tripped mid-stream", true);
             return;
@@ -455,11 +368,6 @@ where
                         let final_frame = std::mem::take(&mut this.frame_buffer);
                         this.process_frame(final_frame);
                     }
-                    if this.terminal.is_none() && this.is_gemini && !this.sent_done {
-                        this.sent_done = true;
-                        this.pending_output
-                            .push_back(Bytes::from_static(b"data: [DONE]\n\n"));
-                    }
                     if this.terminal.is_none() {
                         this.mark_terminal(200, "completed successfully", false);
                     }
@@ -534,7 +442,6 @@ mod tests {
             committed.user.total_spend,
             0.5,
             state.clone(),
-            false,
             None,
         );
 
@@ -578,7 +485,6 @@ mod tests {
             0.0,
             10.0,
             state.clone(),
-            false,
             None,
         );
         let output = monitor
@@ -706,7 +612,6 @@ mod tests {
             0.0,
             10.0,
             state.clone(),
-            false,
             None,
         );
         let output = monitor.collect::<Vec<_>>().await;

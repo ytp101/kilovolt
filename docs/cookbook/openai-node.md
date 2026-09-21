@@ -37,7 +37,7 @@ const client = new OpenAI({
 const trustedUserId = 'user_123'; // derive from the authenticated session
 const stream = await client.chat.completions.create(
   {
-    model: 'gpt-4o-mini',
+    model: 'gpt-4o-mini-2024-07-18',
     messages: [{ role: 'user', content: 'Give one Rust safety benefit.' }],
     stream: true,
   },

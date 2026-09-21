@@ -23,7 +23,7 @@
     <header class="docs-heading">
       <p class="small" style="color: var(--accent); font-weight: 800; margin-bottom: 8px;">Local quick reference</p>
       <h1>Use Kilovolt from your backend</h1>
-      <p class="lead">Choose your language and send an OpenAI-compatible request through the local Kilovolt gateway.</p>
+      <p class="lead">Choose your language and send an OpenAI Chat Completions request through the local Kilovolt gateway.</p>
     </header>
 
     <section class="card docs-section" aria-labelledby="before-heading">
@@ -63,7 +63,7 @@ client = OpenAI(
 
 authenticated_user_id = "user-123"  # derive from the authenticated session
 response = client.chat.completions.create(
-    model="gpt-4o-mini",
+    model="gpt-4o-mini-2024-07-18",
     messages=[{"role": "user", "content": "Hello"}],
     max_completion_tokens=100,
     extra_headers={"X-User-ID": authenticated_user_id},
@@ -84,7 +84,7 @@ const client = new OpenAI({
 const authenticatedUserId = "user-123"; // derive from the authenticated session
 const response = await client.chat.completions.create(
   {
-    model: "gpt-4o-mini",
+    model: "gpt-4o-mini-2024-07-18",
     messages: [{ role: "user", content: "Hello" }],
     max_completion_tokens: 100,
   },
@@ -100,7 +100,7 @@ console.log(response.choices[0].message.content);</code></pre>
   -H "Content-Type: application/json" \
   -H "X-User-ID: user-123" \
   -d '{
-    "model": "gpt-4o-mini",
+    "model": "gpt-4o-mini-2024-07-18",
     "messages": [{"role": "user", "content": "Hello"}],
     "max_completion_tokens": 100
   }'</code></pre>

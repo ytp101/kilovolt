@@ -39,7 +39,7 @@ client = OpenAI(
 # Derive this after authenticating the application user.
 trusted_user_id = "user_123"
 stream = client.chat.completions.create(
-    model="gpt-4o-mini",
+    model="gpt-4o-mini-2024-07-18",
     messages=[{"role": "user", "content": "Explain Rust ownership briefly."}],
     stream=True,
     extra_headers={"X-User-ID": trusted_user_id},
@@ -51,7 +51,7 @@ for chunk in stream:
 print()
 
 response = client.chat.completions.create(
-    model="gpt-4o-mini",
+    model="gpt-4o-mini-2024-07-18",
     messages=[{"role": "user", "content": "Reply with OK."}],
     stream=False,
     max_completion_tokens=100,

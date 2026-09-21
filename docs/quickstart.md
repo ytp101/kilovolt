@@ -5,7 +5,7 @@ provider account or real API key. It uses the disabled-by-default embedded mock,
 fake local credentials, tiny in-memory budgets, and one container.
 
 This page is a provider-free evaluation, not the normal customer installation.
-For a real OpenAI-compatible provider, use the one-command browser setup in the
+For the real OpenAI Chat Completions API, use the one-command browser setup in the
 [README quick start](../README.md#quick-start).
 
 ## Minute 0–5: start the demo
@@ -30,8 +30,8 @@ No provider request is made.
 ```
 
 The script prints a `PASS` line only after asserting each result. It verifies
-health, wrong proxy credentials, fail-closed missing pricing, the documented
-anonymous identity fallback, a successful bounded request, user and project
+health, wrong proxy credentials, fail-closed missing pricing, required trusted
+identity, a successful bounded request, user and project
 preflight `429`s, a stream cut off before `[DONE]`, nonzero spend in authenticated
 stats, and dashboard HTML. It also removes its temporary response files on success
 or failure.
@@ -46,7 +46,7 @@ curl --fail --silent --show-error \
   -H 'X-Kilovolt-Key: demo-proxy-token' \
   -H 'X-Mock-Upstream: true' \
   --data '{
-    "model":"gpt-4o-mini",
+    "model":"gpt-4o-mini-2024-07-18",
     "messages":[{"role":"user","content":"hello"}],
     "stream":false,
     "max_completion_tokens":4
@@ -76,10 +76,9 @@ For a real provider, leave `KILOVOLT_ENABLE_MOCK_UPSTREAM=false`, do not send
 
 `X-User-ID` is a trusted accounting identity, not authentication. Strip any
 client-supplied value and insert the authenticated user ID in the founder's
-backend. Kilovolt currently places a missing value in the shared `anonymous`
-ledger, so a backend that requires identified users must reject missing identity
-before proxying. Never let an untrusted browser or mobile client call Kilovolt
-directly with a self-selected ID.
+backend. Kilovolt rejects a missing or malformed identity before reading the
+request body, contacting OpenAI, or reserving budget. Never let an untrusted
+browser or mobile client call Kilovolt directly with a self-selected ID.
 
 ### curl
 
@@ -92,7 +91,7 @@ curl --fail --show-error \
   -H "X-Kilovolt-Key: ${KILOVOLT_PROXY_TOKEN}" \
   -H 'X-User-ID: authenticated-user-123' \
   -H 'Content-Type: application/json' \
-  --data '{"model":"gpt-4o-mini","messages":[{"role":"user","content":"Reply with OK"}],"max_completion_tokens":16}' \
+  --data '{"model":"gpt-4o-mini-2024-07-18","messages":[{"role":"user","content":"Reply with OK"}],"max_completion_tokens":16}' \
   http://127.0.0.1:8080/v1/chat/completions
 ```
 
@@ -107,7 +106,7 @@ client = OpenAI(
     base_url="http://127.0.0.1:8080/v1",
 )
 response = client.chat.completions.create(
-    model="gpt-4o-mini",
+    model="gpt-4o-mini-2024-07-18",
     messages=[{"role": "user", "content": "Reply with OK"}],
     max_completion_tokens=16,
     extra_headers={
@@ -129,7 +128,7 @@ const client = new OpenAI({
 });
 const response = await client.chat.completions.create(
   {
-    model: "gpt-4o-mini",
+    model: "gpt-4o-mini-2024-07-18",
     messages: [{ role: "user", content: "Reply with OK" }],
     max_completion_tokens: 16,
   },
@@ -197,8 +196,10 @@ the deployment.
 - This slice does not add durable or distributed budgets, hosted control-plane
   behavior, exact billing reconciliation, full provider parity, broad new model
   support, or a production identity system.
-- Built-in prices may be stale. Verify them or provide a reviewed pricing file
-  before real traffic, and keep provider-side limits and alerts enabled.
+- The pinned demo price was verified on 2026-08-29 against the
+  [official OpenAI model page](https://developers.openai.com/api/docs/models/gpt-4o-mini),
+  but provider prices can change. Reverify before real traffic and keep
+  provider-side limits and alerts enabled.
 - Mid-stream enforcement ends the response before the rejected output frame; HTTP
   headers have already been sent, so the dashboard records `429` while the client
   observes an early end rather than a new HTTP status.

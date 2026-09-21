@@ -76,7 +76,7 @@ def wait_for_health(port: int) -> None:
 def send_mock_request(port: int) -> None:
     payload = json.dumps(
         {
-            "model": "gpt-4o-mini",
+            "model": "gpt-4o-mini-2024-07-18",
             "messages": [{"role": "user", "content": "telemetry smoke"}],
             "stream": False,
             "max_completion_tokens": 64,

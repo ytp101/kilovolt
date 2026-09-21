@@ -21,21 +21,17 @@ Required headers:
 ```text
 Authorization: Bearer <provider credential>
 Content-Type: application/json
+X-User-ID: <authenticated backend user ID>
 ```
 
 When configured, `X-Kilovolt-Key` is also required. It is checked before body
 parsing and is not forwarded to a real upstream.
 
-Recommended trusted identity header:
-
-```text
-X-User-ID: <authenticated backend user ID>
-```
-
 `X-User-ID` is not authenticated by Kilovolt. It must be inserted by the
 founder's backend after authentication and must not be accepted from an
-untrusted browser/mobile client. If missing, all such requests share the
-`anonymous` budget.
+untrusted browser/mobile client. Missing or invalid values return an
+`invalid_user_id` `400` response before body parsing, upstream contact, or a
+ledger mutation.
 
 The request must contain a string `model`, a `messages` array, and optional
 boolean `stream` (default `false`). The body is limited by
@@ -48,7 +44,7 @@ curl --no-buffer \
   -H "Authorization: Bearer ${OPENAI_API_KEY}" \
   -H 'Content-Type: application/json' \
   -H 'X-User-ID: user-42' \
-  --data '{"model":"gpt-4o-mini","messages":[{"role":"user","content":"Hello"}],"stream":true}' \
+  --data '{"model":"gpt-4o-mini-2024-07-18","messages":[{"role":"user","content":"Hello"}],"stream":true}' \
   http://127.0.0.1:8080/v1/chat/completions
 ```
 
@@ -66,7 +62,7 @@ curl \
   -H "Authorization: Bearer ${OPENAI_API_KEY}" \
   -H 'Content-Type: application/json' \
   -H 'X-User-ID: user-42' \
-  --data '{"model":"gpt-4o-mini","messages":[{"role":"user","content":"Hello"}],"stream":false,"max_completion_tokens":100}' \
+  --data '{"model":"gpt-4o-mini-2024-07-18","messages":[{"role":"user","content":"Hello"}],"stream":false,"max_completion_tokens":100}' \
   http://127.0.0.1:8080/v1/chat/completions
 ```
 
@@ -77,8 +73,6 @@ upstream must return bounded `application/json`. Trusted integer
 `usage.completion_tokens` or a supported complete message estimate settles
 actual output and releases the rest. Unknown post-acceptance cost commits the
 full output reservation and withholds the response.
-
-Gemini translation requires `stream=true`.
 
 ## Errors
 
@@ -97,7 +91,7 @@ Kilovolt-generated errors use:
 
 | Status | Meaning |
 |---:|---|
-| `400` | Invalid request, missing output bound, unknown pricing, or unsupported response mode. |
+| `400` | Invalid request or `X-User-ID`, missing output bound, unknown pricing, or unsupported model. |
 | `401` | Missing/invalid evaluation gateway key, manual proxy authorization, provider bearer value, or configured dashboard authentication. |
 | `413` | Request body exceeded the configured maximum. |
 | `429` | Token gate, project budget, or user budget rejected the next operation. |

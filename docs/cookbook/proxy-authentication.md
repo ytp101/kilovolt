@@ -34,7 +34,7 @@ curl --fail \
   -H "Authorization: Bearer ${OPENAI_API_KEY}" \
   -H 'Content-Type: application/json' \
   -H 'X-User-ID: authenticated-user-123' \
-  --data '{"model":"gpt-4o-mini","messages":[{"role":"user","content":"Hi"}],"stream":true}' \
+  --data '{"model":"gpt-4o-mini-2024-07-18","messages":[{"role":"user","content":"Hi"}],"stream":true}' \
   http://127.0.0.1:8080/v1/chat/completions
 ```
 

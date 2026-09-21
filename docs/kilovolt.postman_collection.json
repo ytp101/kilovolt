@@ -57,7 +57,7 @@
 				],
 				"body": {
 					"mode": "raw",
-					"raw": "{\n  \"model\": \"gpt-4o\",\n  \"messages\": [\n    {\n      \"role\": \"user\",\n      \"content\": \"Hello Kilovolt! Write a 3-word greeting.\"\n    }\n  ],\n  \"stream\": true\n}",
+					"raw": "{\n  \"model\": \"gpt-4o-mini-2024-07-18\",\n  \"messages\": [\n    {\n      \"role\": \"user\",\n      \"content\": \"Hello Kilovolt! Write a 3-word greeting.\"\n    }\n  ],\n  \"stream\": true\n}",
 					"options": {
 						"raw": {
 							"language": "json"
@@ -116,7 +116,7 @@
 				],
 				"body": {
 					"mode": "raw",
-					"raw": "{\n  \"model\": \"gpt-4o\",\n  \"messages\": [\n    {\n      \"role\": \"user\",\n      \"content\": \"Hello world!\"\n    }\n  ],\n  \"stream\": true\n}",
+					"raw": "{\n  \"model\": \"gpt-4o-mini-2024-07-18\",\n  \"messages\": [\n    {\n      \"role\": \"user\",\n      \"content\": \"Hello world!\"\n    }\n  ],\n  \"stream\": true\n}",
 					"options": {
 						"raw": {
 							"language": "json"

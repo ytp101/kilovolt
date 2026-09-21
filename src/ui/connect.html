@@ -55,7 +55,7 @@ client = OpenAI(
 )
 
 response = client.chat.completions.create(
-    model="gpt-4o-mini",
+    model="gpt-4o-mini-2024-07-18",
     messages=[{"role": "user", "content": "Hello from Kilovolt"}],
     max_completion_tokens=100,
     extra_headers={
@@ -84,7 +84,7 @@ const client = new OpenAI({
 
 const response = await client.chat.completions.create(
   {
-    model: "gpt-4o-mini",
+    model: "gpt-4o-mini-2024-07-18",
     messages: [{ role: "user", content: "Hello from Kilovolt" }],
     max_completion_tokens: 100,
   },
@@ -101,7 +101,7 @@ console.log(response.choices[0].message.content);</code></pre>
   -H "Authorization: Bearer $KILOVOLT_API_KEY" \
   -H "Content-Type: application/json" \
   -H "X-User-ID: local-test-user" \
-  -d '{"model":"gpt-4o-mini","messages":[{"role":"user","content":"Hello from Kilovolt"}],"max_completion_tokens":100}'</code></pre>
+  -d '{"model":"gpt-4o-mini-2024-07-18","messages":[{"role":"user","content":"Hello from Kilovolt"}],"max_completion_tokens":100}'</code></pre>
       <p class="hint"><code>local-test-user</code> is for evaluation only. Replace it with the authenticated user ID from your backend.</p>
     </section>
 

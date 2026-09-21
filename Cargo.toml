@@ -1,7 +1,9 @@
 [package]
 name = "kilovolt"
-version = "1.3.4"
+version = "1.3.5"
 edition = "2024"
+publish = false
+license-file = "LICENSE"
 
 [dependencies]
 axum = "0.7"

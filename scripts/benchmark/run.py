@@ -298,7 +298,7 @@ def prompt_payload(streaming: bool, prompt_bytes: int = 0) -> bytes:
     content = "p" * prompt_bytes if prompt_bytes else "deterministic prompt"
     return json.dumps(
         {
-            "model": "gpt-4o-mini",
+            "model": "gpt-4o-mini-2024-07-18",
             "messages": [{"role": "user", "content": content}],
             "stream": streaming,
         },

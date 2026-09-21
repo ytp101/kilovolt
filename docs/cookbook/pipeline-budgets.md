@@ -36,7 +36,7 @@ curl --fail --silent --no-buffer \
   -H 'X-Pipeline-ID: run-2026-07-29-001' \
   -H 'X-Pipeline-Name: nightly-summary' \
   -H 'X-Step-Name: summarize' \
-  --data '{"model":"gpt-4o-mini","messages":[{"role":"user","content":"Summarize this."}],"stream":true}' \
+  --data '{"model":"gpt-4o-mini-2024-07-18","messages":[{"role":"user","content":"Summarize this."}],"stream":true}' \
   http://127.0.0.1:8080/v1/chat/completions
 ```
 

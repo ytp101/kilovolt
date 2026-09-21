@@ -39,7 +39,7 @@ trusted rather than authenticated by Kilovolt.
 | Multiple proxy instances | Known limitation | Ledgers are independent; aggregate spend can exceed one configured project limit. |
 | Floating-point money | Known limitation | `f64` can reject a decimal edge early or accumulate rounding error. |
 | Incorrect/stale model pricing | Operator responsibility | Unknown models fail closed and validated local overrides are supported, but built-ins remain unverified estimates. Validate prices before production. |
-| Unknown generated output | Mitigated for inspected OpenAI-compatible choices | Supported text/refusal/function/tool fields are charged before forwarding; unknown non-empty generated fields terminate forwarding. Provider-native schemas outside the documented surface are not claimed. |
+| Unknown generated output | Mitigated for inspected OpenAI Chat Completions choices | Supported text/refusal/function/tool fields are charged before forwarding; unknown non-empty generated fields terminate forwarding. Schemas outside the documented surface are not claimed. |
 | Provider ignores non-stream maximum | Known residual risk | Kilovolt withholds the response and consumes its full internal reservation, but cannot undo provider generation or guarantee the invoice stayed within that reservation. |
 | Public mock route | Mitigated by default | The route and `X-Mock-Upstream` are disabled unless explicitly enabled. Configured proxy authentication also applies to the mock route. |
 | Company telemetry web-admin authentication | Known limitation | The separate `web/` application has its own deployment and authentication design; operators of that component must set `ADMIN_PASSWORD` and review it independently. |

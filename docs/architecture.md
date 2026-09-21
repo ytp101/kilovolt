@@ -1,7 +1,7 @@
 # Architecture
 
 Kilovolt is a single-process reverse proxy between an authenticated application
-backend and an upstream chat-completions provider. One self-hosted process is one
+backend and the OpenAI Chat Completions API. One self-hosted process is one
 implicit application project.
 
 ## Trust and request flow
@@ -10,7 +10,7 @@ implicit application project.
 flowchart LR
     C["Browser or mobile client"] -->|"authenticated application request"| B["Founder's backend"]
     B -->|"Bearer Kilovolt gateway key or manual provider key + trusted X-User-ID"| K["Kilovolt"]
-    K -->|"OpenAI-compatible request with provider credential"| P["AI provider"]
+    K -->|"Chat Completions request with OpenAI credential"| P["OpenAI"]
     K --> D["Local customer dashboard"]
     K -. "only when explicitly enabled" .-> T["Kilovolt company telemetry endpoint"]
 ```
@@ -26,23 +26,24 @@ untrusted browser or mobile client.
    manual mode instead validates optional `X-Kilovolt-Key` and forwards the
    provider bearer credential. Authentication happens before body parsing or a
    budget reservation; both paths then validate `Content-Type`.
-2. Read at most `KILOVOLT_MAX_REQUEST_BODY_BYTES`.
-3. Parse the supported chat-completions fields and estimate prompt tokens.
-4. Check optional token gates.
-5. Resolve a known configured price. Unknown pricing fails before upstream.
-6. Atomically reserve prompt cost for streaming, or prompt plus the selected
+2. Require a valid trusted `X-User-ID` before reading the body.
+3. Read at most `KILOVOLT_MAX_REQUEST_BODY_BYTES`.
+4. Parse the supported Chat Completions fields and estimate prompt tokens.
+5. Check optional token gates.
+6. Resolve a known OpenAI price. Unknown pricing fails before upstream.
+7. Atomically reserve prompt cost for streaming, or prompt plus the selected
    maximum output cost for non-streaming, against both accounts.
-7. Send the request upstream and wait no longer than
+8. Send the request to OpenAI and wait no longer than
    `KILOVOLT_UPSTREAM_HEADER_TIMEOUT_SECONDS` for response headers.
-8. Release every reservation for a pre-acceptance connection failure, timeout,
+9. Release every reservation for a pre-acceptance connection failure, timeout,
    or upstream non-success response.
-9. After successful headers, commit prompt cost. Non-streaming maximum output
+10. After successful headers, commit prompt cost. Non-streaming maximum output
    remains reserved.
-10. Process the body as bounded SSE when `stream=true`, or bounded JSON when
+11. Process the body as bounded SSE when `stream=true`, or bounded JSON when
    `stream=false`.
-11. Settle known non-stream output and release unused reservation, or commit the
+12. Settle known non-stream output and release unused reservation, or commit the
     full output reservation when post-acceptance cost becomes unknowable.
-12. Record local operational statistics when the request finishes.
+13. Record local operational statistics when the request finishes.
 
 ```mermaid
 stateDiagram-v2
@@ -84,7 +85,7 @@ events split across many chunks, and a valid final event without a trailing
 blank line. Invalid UTF-8, invalid fields, malformed JSON data, or an oversized
 frame terminates forwarding and records a `502`.
 
-OpenAI-compatible supported generated fields are converted to a deterministic
+Supported OpenAI generated fields are converted to a deterministic
 canonical representation per event before charging. These include content,
 refusal, legacy function calls, tool-call IDs/types/names/arguments, and
 supported structured assistant content. Plain text retains the compatible
@@ -118,9 +119,6 @@ fails, the client cancels, or another post-acceptance failure makes cost unknown
 the entire maximum output reservation is committed conservatively and the
 provider response is withheld. The provider invoice can still exceed the
 internal reservation if the provider ignored the transmitted maximum.
-
-Gemini translation is streaming-only. A Gemini request with `stream=false` is
-rejected before reservation.
 
 ## Dashboard and telemetry data paths
 

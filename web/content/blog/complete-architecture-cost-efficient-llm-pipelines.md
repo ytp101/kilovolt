@@ -1,6 +1,6 @@
 ---
 title: "The Complete Architecture of Cost-Efficient LLM Pipelines"
-description: "An architectural guide on designing fail-safe, memory-bounded, and cost-controlled pipelines for production LLM deployments using Rust and open-source gateways."
+description: "An architectural guide to evaluating fail-safe, memory-bounded, and cost-controlled LLM pipelines using a self-hosted Rust gateway."
 slug: "complete-architecture-cost-efficient-llm-pipelines"
 date: "2026-07-19"
 ---
@@ -24,7 +24,7 @@ To maintain absolute stability and protect your infrastructure from runaway bill
 A central component of a production-grade LLM infrastructure is a lightweight reverse proxy sitting between your application code and providers like OpenAI, OpenRouter, or local engines like vLLM. 
 
 ```
-[Application Code] ──► [Kilovolt Proxy Gateway] ──► [OpenAI / vLLM / Gemini]
+[Application Code] ──► [Kilovolt Proxy Gateway] ──► [OpenAI Chat Completions]
                                │
                        (Enforces Budgets)
 ```
