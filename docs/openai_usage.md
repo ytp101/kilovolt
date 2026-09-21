@@ -1,6 +1,6 @@
 # OpenAI route behavior
 
-Non-`gemini-` requests go to `KILOVOLT_OPENAI_UPSTREAM_URL`, which defaults to:
+All supported requests go to `KILOVOLT_OPENAI_UPSTREAM_URL`, which defaults to:
 
 ```text
 https://api.openai.com/v1/chat/completions
@@ -15,15 +15,19 @@ The request shape and response accounting limits are documented in
 - [Python backend](cookbook/openai-python.md)
 - [Node.js backend](cookbook/openai-node.md)
 - [Next.js backend-for-frontend](cookbook/nextjs-backend.md)
-- [Local OpenAI-compatible endpoint](cookbook/local-openai-compatible-provider.md)
+- [Unverified custom upstream compatibility](cookbook/local-openai-compatible-provider.md)
 
 ## Pricing warning
 
-Kilovolt has metadata-bearing built-in entries and supports a validated local
-operator registry. Unknown models fail closed before upstream; there is no
-arbitrary fallback. Built-in values were not independently verified in this
-offline work and may be outdated. Operators must validate them before
-production. Calculated spend is not an exact provider invoice.
+Kilovolt supports exact built-in entries for `gpt-4o-mini` and the pinned
+`gpt-4o-mini-2024-07-18` snapshot plus a validated local operator registry.
+Their $0.15 input / $0.60 output per million text-token prices were verified on
+2026-08-29 against the
+[official OpenAI model page](https://developers.openai.com/api/docs/models/gpt-4o-mini).
+The provider page does not state a separate pricing effective date. Unknown
+models fail closed before upstream; there is no arbitrary fallback. Operators
+must revalidate pricing before real use. Calculated spend is not an exact
+provider invoice.
 
 ## Accounting boundaries
 

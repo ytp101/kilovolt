@@ -1,7 +1,7 @@
 # Kilovolt
 
 Kilovolt is a self-hosted Rust gateway placed between an application's trusted
-backend and an OpenAI-compatible chat-completions provider. It enforces
+backend and the OpenAI Chat Completions API. It enforces
 process-local calculated-spend limits for the application project and each
 trusted `X-User-ID`, including supported streaming output. It complements
 provider-side controls; its estimates are not exact provider invoices.
@@ -44,13 +44,14 @@ Trusted application backend
   -> Kilovolt gateway key + trusted X-User-ID
   -> Kilovolt checks project and per-user calculated-spend limits
   -> Kilovolt inserts the temporarily stored OpenAI key
-  -> OpenAI-compatible provider
+  -> OpenAI Chat Completions API
 ```
 
 The setup page pre-fills a $10 project limit and a $1 default per-user limit.
 Kilovolt generates a high-entropy gateway key, masks the OpenAI key after setup,
-and offers one clearly labeled, very small paid test using `gpt-4o-mini`. A
-successful test creates a visible calculated-spend record in the dashboard.
+and offers one clearly labeled, very small paid test using the pinned
+`gpt-4o-mini-2024-07-18` snapshot. A successful test creates a visible
+calculated-spend record in the dashboard.
 
 ## Connect your application
 
@@ -84,7 +85,7 @@ client = OpenAI(
 )
 
 response = client.chat.completions.create(
-    model="gpt-4o-mini",
+    model="gpt-4o-mini-2024-07-18",
     messages=[{"role": "user", "content": "Hello from Kilovolt"}],
     max_completion_tokens=100,
     extra_headers={
@@ -116,8 +117,8 @@ localhost evaluation gateway directly.
 - Monetary calculations currently use floating-point `f64` values.
 - Streaming text uses bounded per-event accounting, not exact whole-answer
   provider billing equivalence.
-- `X-User-ID` is accounting identity, not end-user authentication; a missing
-  value uses the shared `anonymous` ledger.
+- `X-User-ID` is required accounting identity, not end-user authentication;
+  Kilovolt rejects missing or invalid values before reading the request body.
 - The quick start is localhost-only evaluation, not a production-secure
   deployment.
 
@@ -160,7 +161,8 @@ Implemented and tested:
 - atomic project and per-user prompt reservations and output charges;
 - bounded non-streaming prompt-plus-maximum-output reservations with atomic
   settlement or conservative full-reservation finalization;
-- bounded OpenAI-compatible SSE reconstruction across arbitrary byte chunks;
+- bounded OpenAI Chat Completions SSE reconstruction across arbitrary byte
+  chunks;
 - tool/function definitions, calls, refusal, and supported structured-content
   accounting;
 - fail-closed, operator-overridable model pricing;
@@ -170,9 +172,8 @@ Implemented and tested:
 - company telemetry disabled by default;
 - deterministic concurrency, integration, and benchmark harnesses.
 
-Experimental:
+Excluded from the official MVP:
 
-- streaming Gemini request/response translation;
 - compatibility with a custom OpenAI-like upstream URL, which must be verified
   against the specific provider and version;
 - optional pipeline/day token gates, whose check/update lifecycle is weaker
@@ -185,16 +186,27 @@ Experimental:
 | `GET /` | First-run setup, then the local evaluation dashboard. Configured manual mode redirects to `/dashboard`. |
 | `POST /setup` | One-time in-memory evaluation setup; unavailable after completion. |
 | `POST /evaluation/test` | Small real-provider test through the normal proxy and accounting path; evaluation mode only. |
-| `POST /v1/chat/completions` | OpenAI-shaped streaming and non-streaming requests. Non-Gemini traffic uses the configured OpenAI upstream URL. |
+| `POST /v1/chat/completions` | Supported OpenAI Chat Completions streaming and non-streaming requests. |
 | `GET /health` | Public liveness response: `OK`. |
 | `GET /dashboard` | Local evaluation dashboard, or authenticated dashboard in configured manual mode. |
 | `GET /api/stats` | Local evaluation statistics, or authenticated statistics in configured manual mode. |
 | `POST /mock/v1/chat/completions` | Disabled-by-default deterministic local test/benchmark upstream. |
 
-Configured manual mode translates Gemini models only when `stream=true`.
-Browser evaluation mode accepts OpenAI models only so it cannot send the saved
-OpenAI key to another provider. Other provider families and API routes are not
-claimed.
+Kilovolt officially supports OpenAI Chat Completions only. Other provider
+families and OpenAI API routes are rejected or unavailable. The configurable
+upstream URL remains an advanced, unverified compatibility setting and is not
+part of the academic MVP claim.
+
+## Pricing provenance
+
+The final evaluation model is the exact `gpt-4o-mini-2024-07-18` snapshot. Its
+built-in price is $0.15 per million input tokens and $0.60 per million output
+tokens, verified on 2026-08-29 against the
+[official OpenAI GPT-4o Mini model page](https://developers.openai.com/api/docs/models/gpt-4o-mini).
+OpenAI does not state a separate effective date on that page, so Kilovolt records
+the verification date rather than inventing one. Prices and token accounting can
+change or differ from the provider invoice; reverify before use and retain
+provider-side budgets and alerts.
 
 ## Project and per-user budgets
 
@@ -257,5 +269,13 @@ was performed.
 - [Telemetry fields and controls](docs/telemetry.md)
 - [Benchmarks and raw evidence](docs/benchmarks.md)
 - [Production checklist](docs/production-checklist.md)
+- [Academic project statement](ACADEMIC_PROJECT.md)
 - [Cookbook](docs/cookbook/README.md)
 - [API details](docs/api_usage.md)
+
+## Rights and academic status
+
+Kilovolt is an academic project owned by the GitHub account `ytp101`. The source
+is published for evaluation and grading, but it is **not offered as open source**:
+all rights are reserved and no reuse license is granted. See [LICENSE](LICENSE)
+and [ACADEMIC_PROJECT.md](ACADEMIC_PROJECT.md).

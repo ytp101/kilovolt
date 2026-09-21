@@ -16,7 +16,7 @@ There is no configuration-file schema or validation CLI in this phase.
 | `HOST` | string | none, optional legacy fallback | Used only when `BIND_ADDR` is absent. Same exposure implications. | `127.0.0.1` |
 | `KILOVOLT_PROJECT_BUDGET` | finite non-negative `f64` USD estimate | Falls back to `KILOVOLT_DEFAULT_BUDGET` | Deployment-wide calculated-spend limit shared by all users. Floating-point limitations apply. | `100.00` |
 | `KILOVOLT_DEFAULT_BUDGET` | finite non-negative `f64` USD estimate | `1.00` | Default per-`X-User-ID` calculated-spend limit. No runtime per-user override API exists. | `5.00` |
-| `KILOVOLT_OPENAI_UPSTREAM_URL` | absolute HTTP(S) URL | `https://api.openai.com/v1/chat/completions` | Receives provider credentials and request bodies for non-Gemini models. Use TLS outside localhost and verify wire compatibility. | `http://127.0.0.1:11434/v1/chat/completions` |
+| `KILOVOLT_OPENAI_UPSTREAM_URL` | absolute HTTP(S) URL | `https://api.openai.com/v1/chat/completions` | Receives OpenAI credentials and Chat Completions request bodies. A custom URL is advanced, unverified compatibility behavior outside the official MVP. | `http://127.0.0.1:11434/v1/chat/completions` |
 | `KILOVOLT_UPSTREAM_HEADER_TIMEOUT_SECONDS` | positive integer seconds | `30` | Deadline for receiving upstream response headers. It does not limit a stream after headers. Invalid/zero values use the default. | `15` |
 | `KILOVOLT_MAX_REQUEST_BODY_BYTES` | positive integer bytes | `1048576` | Hard bound before JSON allocation; invalid/zero values use the safe default. | `2097152` |
 | `KILOVOLT_MAX_UPSTREAM_BODY_BYTES` | positive integer bytes | `4194304` | Bounds non-stream JSON and upstream error bodies. Streaming uses the frame limit instead. | `8388608` |
@@ -39,10 +39,10 @@ There is no configuration-file schema or validation CLI in this phase.
 
 | Header | Required | Meaning |
 |---|---|---|
-| `Authorization: Bearer …` | yes | Browser evaluation mode validates the generated Kilovolt gateway key and substitutes the stored provider key. Configured manual mode forwards this value to OpenAI-compatible upstreams or translates it to `x-goog-api-key` for Gemini. |
+| `Authorization: Bearer …` | yes | Browser evaluation mode validates the generated Kilovolt gateway key and substitutes the stored OpenAI key. Configured manual mode forwards this value to the configured OpenAI Chat Completions URL. |
 | `X-Kilovolt-Key` | configured manual mode when `KILOVOLT_PROXY_TOKEN` is set | Independent proxy credential checked before body parsing or budget reservation. It is not forwarded to real upstreams. Browser evaluation mode does not use this header. |
 | `Content-Type: application/json` | yes | Required request media type. |
-| `X-User-ID` | strongly recommended | Trusted backend identity. Missing values use the shared `anonymous` account. |
+| `X-User-ID` | yes | Trusted backend identity. Missing, empty, oversized, or invalid values return `400` before the body, upstream, or ledger is touched. Allowed characters are ASCII letters, digits, `-`, `_`, `.`, `:`, and `@`; maximum length is 128 bytes. |
 | `X-Pipeline-ID` | only for pipeline grouping | Process-local pipeline-run key. |
 | `X-Pipeline-Name` | no | Human-readable logging context. |
 | `X-Step-Name` | no | Human-readable logging context. |
@@ -52,10 +52,13 @@ There is no configuration-file schema or validation CLI in this phase.
 ## Pricing configuration
 
 Pricing resolution is fail closed: an unknown model returns
-`model_pricing_not_configured` before reservation or upstream contact. Built-in
-entries preserve compatibility but were not independently price-verified in
-this offline work and have no asserted effective date. Operators must verify
-current provider prices.
+`model_pricing_not_configured` before reservation or upstream contact. The
+built-in `gpt-4o-mini` alias and pinned `gpt-4o-mini-2024-07-18` snapshot use
+exact matching and the official text-token prices verified on 2026-08-29:
+$0.15 input and $0.60 output per million tokens. The official source is the
+[OpenAI GPT-4o Mini model page](https://developers.openai.com/api/docs/models/gpt-4o-mini).
+The provider page does not publish a separate pricing effective date, so the
+repository records the verification date rather than inventing one.
 
 `KILOVOLT_PRICING_FILE` accepts schema version 1:
 
@@ -73,7 +76,7 @@ current provider prices.
 }
 ```
 
-`provider` is `openai` or `gemini`; `match` is `exact` or `prefix`. Operator
+`provider` must be `openai`; `match` is `exact` or `prefix`. Operator
 exact matches precede operator prefixes, the longest prefix wins, and operator
 entries precede built-ins. Duplicate exact entries, duplicate/ambiguous
 prefixes, invalid dates, empty names, unknown types/schema versions, and

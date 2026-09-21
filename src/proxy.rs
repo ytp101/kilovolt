@@ -16,6 +16,8 @@ use crate::config::{AppState, secrets_match};
 use crate::ledger::{BudgetError, BudgetScope, BudgetSnapshot};
 use crate::pricing::Provider;
 
+const MAX_USER_ID_BYTES: usize = 128;
+
 // Structs for incoming request body parsing
 #[derive(serde::Deserialize, Clone)]
 #[allow(dead_code)]
@@ -102,6 +104,33 @@ fn evaluation_setup_required_error() -> Response {
         "Complete local evaluation setup at http://127.0.0.1:8080 before proxying requests",
         "invalid_request_error",
         Some("setup_required"),
+    )
+}
+
+fn trusted_user_id(headers: &HeaderMap) -> Result<String, &'static str> {
+    let value = headers
+        .get("x-user-id")
+        .ok_or("X-User-ID header is required")?;
+    let user_id = value
+        .to_str()
+        .map_err(|_| "X-User-ID header must contain visible ASCII characters")?;
+    if user_id.is_empty() || user_id.len() > MAX_USER_ID_BYTES {
+        return Err("X-User-ID must contain between 1 and 128 characters");
+    }
+    if !user_id.bytes().all(|byte| {
+        byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b':' | b'@')
+    }) {
+        return Err("X-User-ID may contain only letters, digits, '-', '_', '.', ':', and '@'");
+    }
+    Ok(user_id.to_string())
+}
+
+fn trusted_user_id_error(message: &str) -> Response {
+    make_error_response(
+        StatusCode::BAD_REQUEST,
+        message,
+        "invalid_request_error",
+        Some("invalid_user_id"),
     )
 }
 
@@ -1098,12 +1127,23 @@ pub async fn chat_completions_proxy(
         }
     };
 
-    // 3. Extract Identity: X-User-ID header (defaults to "anonymous")
-    let user_id = headers
-        .get("x-user-id")
-        .and_then(|val| val.to_str().ok())
-        .unwrap_or("anonymous")
-        .to_string();
+    // 3. Require the trusted accounting identity before reading the body,
+    // contacting OpenAI, or creating a financial reservation.
+    let user_id = match trusted_user_id(&headers) {
+        Ok(user_id) => user_id,
+        Err(message) => {
+            state.record_request(
+                &request_id,
+                "unattributed",
+                "unknown",
+                400,
+                start_time.elapsed().as_millis() as u64,
+                0,
+                0.0,
+            );
+            return trusted_user_id_error(message);
+        }
+    };
 
     // 4. Read request body bytes to calculate prompt token count
     let body_bytes = match axum::body::to_bytes(body, state.max_request_body_bytes).await {
@@ -1175,42 +1215,6 @@ pub async fn chat_completions_proxy(
             );
         }
     };
-
-    let is_gemini = request.model.starts_with("gemini-");
-    if evaluation_setup.is_some() && is_gemini {
-        state.record_request(
-            &request_id,
-            &user_id,
-            &request.model,
-            400,
-            start_time.elapsed().as_millis() as u64,
-            0,
-            0.0,
-        );
-        return make_error_response(
-            StatusCode::BAD_REQUEST,
-            "Browser evaluation mode supports OpenAI models only",
-            "invalid_request_error",
-            Some("evaluation_openai_only"),
-        );
-    }
-    if is_gemini && !request.stream {
-        state.record_request(
-            &request_id,
-            &user_id,
-            &request.model,
-            400,
-            start_time.elapsed().as_millis() as u64,
-            0,
-            0.0,
-        );
-        return make_error_response(
-            StatusCode::BAD_REQUEST,
-            "Non-streaming Gemini translation is not supported; set stream=true",
-            "invalid_request_error",
-            Some("unsupported_response_mode"),
-        );
-    }
 
     let provider = Provider::for_model(&request.model);
     let resolved_pricing = match state.pricing_registry.resolve(provider, &request.model) {
@@ -1521,23 +1525,10 @@ pub async fn chat_completions_proxy(
         .total_tokens_consumed
         .fetch_add(prompt_tokens, Ordering::Relaxed);
 
-    // Extract raw API Key for downstream delivery
-    let api_key = upstream_auth_val
-        .to_str()
-        .unwrap_or("")
-        .trim_start_matches("Bearer ")
-        .to_string();
-
     // 7. Conditional routing: Route to local mock if X-Mock-Upstream header is present
     let upstream_url = if headers.contains_key("x-mock-upstream") {
         info!("Routing to local mock upstream endpoint");
         format!("http://127.0.0.1:{}/mock/v1/chat/completions", state.port)
-    } else if is_gemini {
-        // Route to Gemini native API
-        format!(
-            "https://generativelanguage.googleapis.com/v1beta/models/{}:streamGenerateContent?alt=sse",
-            request.model
-        )
     } else {
         state.openai_upstream_url.clone()
     };
@@ -1555,86 +1546,23 @@ pub async fn chat_completions_proxy(
         }
     }
 
-    if is_gemini && !headers.contains_key("x-mock-upstream") {
-        // Gemini Native SSE parameters & body mapping
-        upstream_req = upstream_req
-            .header("x-goog-api-key", &api_key)
-            .header(reqwest::header::CONTENT_TYPE, "application/json");
-
-        #[derive(serde::Serialize)]
-        struct GeminiRequest {
-            contents: Vec<GeminiContent>,
+    let forwarded_body = match serde_json::to_vec(&request_json) {
+        Ok(body) => body,
+        Err(error) => {
+            reservation_guard.release("OpenAI request serialization failed");
+            error!("Failed to serialize forwarded request: {error}");
+            return make_error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Failed to prepare upstream request",
+                "api_error",
+                None,
+            );
         }
-        #[derive(serde::Serialize)]
-        struct GeminiContent {
-            role: String,
-            parts: Vec<GeminiPart>,
-        }
-        #[derive(serde::Serialize)]
-        struct GeminiPart {
-            text: String,
-        }
-
-        let gemini_contents: Vec<GeminiContent> = request
-            .messages
-            .iter()
-            .map(|msg| {
-                let role = match msg.role.as_str() {
-                    "assistant" => "model",
-                    r => r,
-                }
-                .to_string();
-
-                let content_str = match &msg.content {
-                    Some(serde_json::Value::String(s)) => s.clone(),
-                    Some(val) => val.to_string(),
-                    None => "".to_string(),
-                };
-
-                GeminiContent {
-                    role,
-                    parts: vec![GeminiPart { text: content_str }],
-                }
-            })
-            .collect();
-
-        let gemini_req = GeminiRequest {
-            contents: gemini_contents,
-        };
-        let gemini_body = match serde_json::to_vec(&gemini_req) {
-            Ok(body) => body,
-            Err(error) => {
-                reservation_guard.release("Gemini request serialization failed");
-                error!("Failed to serialize Gemini request: {:?}", error);
-                return make_error_response(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "Failed to prepare upstream request",
-                    "api_error",
-                    None,
-                );
-            }
-        };
-        upstream_req = upstream_req.body(gemini_body);
-    } else {
-        // Standard OpenAI layout
-        let forwarded_body = match serde_json::to_vec(&request_json) {
-            Ok(body) => body,
-            Err(error) => {
-                reservation_guard.release("OpenAI request serialization failed");
-                error!("Failed to serialize forwarded request: {error}");
-                return make_error_response(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "Failed to prepare upstream request",
-                    "api_error",
-                    None,
-                );
-            }
-        };
-        upstream_req = upstream_req
-            .header(reqwest::header::AUTHORIZATION, upstream_auth_val)
-            .header(reqwest::header::CONTENT_TYPE, content_type_val)
-            .body(forwarded_body);
-    }
+    };
+    upstream_req = upstream_req
+        .header(reqwest::header::AUTHORIZATION, upstream_auth_val)
+        .header(reqwest::header::CONTENT_TYPE, content_type_val)
+        .body(forwarded_body);
 
     info!(
         "Initiating handshake with upstream provider at {}...",
@@ -2161,7 +2089,6 @@ pub async fn chat_completions_proxy(
         committed.user.total_spend,
         user_budget_limit,
         state.clone(), // Pass state to enable stats updates on close/cancel
-        is_gemini,
         pipeline_id,
     );
 
@@ -2254,6 +2181,52 @@ mod tests {
         body: Body,
     ) -> axum::response::Response {
         chat_completions_proxy(State(state), proxy_headers(user_id), body).await
+    }
+
+    #[tokio::test]
+    async fn missing_or_invalid_user_identity_fails_before_body_upstream_and_ledger() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let counted = Arc::clone(&calls);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let app = Router::new().route(
+            "/v1/chat/completions",
+            post(move || {
+                counted.fetch_add(1, Ordering::SeqCst);
+                async { StatusCode::OK }
+            }),
+        );
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        for invalid_user_id in [None, Some(""), Some("browser chosen/user")] {
+            let mut state = test_state(port, 1.0);
+            state.openai_upstream_url = format!("http://127.0.0.1:{port}/v1/chat/completions");
+            let mut headers = proxy_headers("temporary-valid-user");
+            headers.remove("x-mock-upstream");
+            headers.remove("x-user-id");
+            if let Some(invalid_user_id) = invalid_user_id {
+                headers.insert(
+                    "x-user-id",
+                    HeaderValue::from_str(invalid_user_id).expect("test header should parse"),
+                );
+            }
+
+            let response = chat_completions_proxy(
+                State(state.clone()),
+                headers,
+                Body::from("body must not be parsed without a trusted identity"),
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+            assert!(
+                String::from_utf8_lossy(&response_bytes(response).await)
+                    .contains("invalid_user_id")
+            );
+            assert_eq!(state.budget_ledger.project_snapshot().total_spend, 0.0);
+        }
+
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        server.abort();
     }
 
     fn proxy_prompt_cost() -> f64 {
@@ -2688,18 +2661,18 @@ mod tests {
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
         assert_eq!(configured.budget_ledger.project_snapshot().total_spend, 0.0);
 
-        let mut gemini_headers = proxy_headers("evaluation-user");
-        gemini_headers.remove("x-mock-upstream");
-        gemini_headers.insert(
+        let mut unsupported_headers = proxy_headers("evaluation-user");
+        unsupported_headers.remove("x-mock-upstream");
+        unsupported_headers.insert(
             axum::http::header::AUTHORIZATION,
             HeaderValue::from_static("Bearer kvlt_generated_gateway"),
         );
-        let gemini_response = chat_completions_proxy(
+        let unsupported_response = chat_completions_proxy(
             State(configured.clone()),
-            gemini_headers,
+            unsupported_headers,
             Body::from(
                 serde_json::json!({
-                    "model": "gemini-2.5-flash",
+                    "model": "gpt-4o-mini-audio-preview",
                     "messages": [{"role": "user", "content": "test"}],
                     "stream": true
                 })
@@ -2707,14 +2680,16 @@ mod tests {
             ),
         )
         .await;
-        assert_eq!(gemini_response.status(), StatusCode::BAD_REQUEST);
-        let gemini_body = gemini_response
+        assert_eq!(unsupported_response.status(), StatusCode::BAD_REQUEST);
+        let unsupported_body = unsupported_response
             .into_body()
             .collect()
             .await
             .unwrap()
             .to_bytes();
-        assert!(String::from_utf8_lossy(&gemini_body).contains("evaluation_openai_only"));
+        assert!(
+            String::from_utf8_lossy(&unsupported_body).contains("model_pricing_not_configured")
+        );
         assert_eq!(configured.budget_ledger.project_snapshot().total_spend, 0.0);
 
         for (project_limit, user_limit, expected_message) in [

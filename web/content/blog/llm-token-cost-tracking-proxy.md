@@ -25,8 +25,7 @@ To protect your wallet from runaway loops, read [stop openai runaway token billi
 
 Our Rust gateway supports detailed pricing maps for all major models:
 
-* **GPT-4o**: Input: \$5.00 / 1M tokens, Output: \$15.00 / 1M tokens.
-* **GPT-4o-Mini**: Input: \$0.15 / 1M tokens, Output: \$0.60 / 1M tokens.
+* **GPT-4o Mini snapshot `gpt-4o-mini-2024-07-18`**: Input: \$0.15 / 1M tokens, Output: \$0.60 / 1M tokens (verified 2026-08-29 against the official OpenAI model page).
 * **GPT-4**: Input: \$30.00 / 1M tokens, Output: \$60.00 / 1M tokens.
 
 The gateway logs detailed statistics for every transaction to `/dashboard` and reports cost telemetry dynamically.

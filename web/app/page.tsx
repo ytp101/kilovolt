@@ -115,10 +115,10 @@ export default function Home() {
           {/* Card 2 */}
           <div className="bg-slate-900/40 border border-slate-900 hover:border-slate-800 rounded-2xl p-8 shadow-xl backdrop-blur-sm transition duration-300 flex flex-col justify-between group">
             <div className="space-y-4">
-              <div className="text-3xl">♊</div>
-              <h3 className="text-xl font-bold text-slate-200 group-hover:text-yellow-400 transition">Gemini SSE Translation</h3>
+              <div className="text-3xl">🔐</div>
+              <h3 className="text-xl font-bold text-slate-200 group-hover:text-yellow-400 transition">Trusted User Accounting</h3>
               <p className="text-sm text-slate-400 leading-relaxed">
-                Experimental streaming-only translation for supported Gemini candidate text into OpenAI-shaped SSE chunks.
+                Requires a backend-supplied X-User-ID and atomically checks both the project and that user before contacting OpenAI.
               </p>
             </div>
           </div>
@@ -204,13 +204,16 @@ export default function Home() {
               <span className="text-yellow-500">curl</span> -i -N -X POST http://127.0.0.1:8080/v1/chat/completions \
             </p>
             <p className="pl-4">
-              -H <span className="text-emerald-400">&quot;Authorization: Bearer sk-proj-your-key&quot;</span> \
+              -H <span className="text-emerald-400">&quot;Authorization: Bearer kvlt_your_gateway_key&quot;</span> \
             </p>
             <p className="pl-4">
               -H <span className="text-emerald-400">&quot;X-User-ID: developer_alice&quot;</span> \
             </p>
             <p className="pl-4">
-              -d <span className="text-emerald-400">{`'{"model": "gemini-1.5-flash", "messages": [{"role": "user", "content": "Hi!"}], "stream": true}'`}</span>
+              -H <span className="text-emerald-400">&quot;Content-Type: application/json&quot;</span> \
+            </p>
+            <p className="pl-4">
+              -d <span className="text-emerald-400">{`'{"model": "gpt-4o-mini-2024-07-18", "messages": [{"role": "user", "content": "Hi!"}], "stream": true}'`}</span>
             </p>
           </div>
         </section>

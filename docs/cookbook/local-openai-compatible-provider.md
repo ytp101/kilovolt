@@ -1,9 +1,10 @@
-# Local OpenAI-compatible provider
+# Unverified custom upstream compatibility
 
 ## Goal
 
-Route non-Gemini chat-completions requests to a verified local endpoint instead
-of the default OpenAI URL.
+Experiment with routing the OpenAI Chat Completions request shape to a custom
+endpoint instead of the default OpenAI URL. This is outside Kilovolt's official
+MVP support boundary.
 
 ## Request flow
 
@@ -53,8 +54,8 @@ intact JSON completion with supported usage or message/function/tool content.
 
 ## Expected success behavior
 
-Kilovolt uses the configured URL for every non-`gemini-` model and accounts the
-supported response shape.
+Kilovolt uses the configured URL for the request and attempts to account the
+documented response shape. A custom endpoint is not verified or guaranteed.
 
 ## Expected budget-block behavior
 
@@ -66,7 +67,8 @@ registry.
 
 Use TLS when the endpoint is not loopback/private. The URL receives the bearer
 credential. Verify any configured zero-dollar local price rather than treating
-it as a general fallback.
+it as a general fallback. Do not describe successful local testing as official
+provider support.
 
 ## Common failure modes
 

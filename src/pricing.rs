@@ -9,20 +9,20 @@ pub struct ModelPricing {
     pub output_cost_per_token: f64,
 }
 
+pub const OPENAI_DEMO_MODEL: &str = "gpt-4o-mini-2024-07-18";
+pub const OPENAI_DEMO_PRICING_SOURCE: &str =
+    "https://developers.openai.com/api/docs/models/gpt-4o-mini";
+pub const OPENAI_DEMO_PRICING_VERIFIED_ON: &str = "2026-08-29";
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Provider {
     Openai,
-    Gemini,
 }
 
 impl Provider {
-    pub fn for_model(model: &str) -> Self {
-        if model.starts_with("gemini-") {
-            Self::Gemini
-        } else {
-            Self::Openai
-        }
+    pub fn for_model(_model: &str) -> Self {
+        Self::Openai
     }
 }
 
@@ -30,7 +30,6 @@ impl fmt::Display for Provider {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Openai => formatter.write_str("openai"),
-            Self::Gemini => formatter.write_str("gemini"),
         }
     }
 }
@@ -60,7 +59,10 @@ pub enum PricingSource {
 impl fmt::Display for PricingSource {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::BuiltIn => formatter.write_str("built-in-unverified"),
+            Self::BuiltIn => write!(
+                formatter,
+                "built-in-verified-{OPENAI_DEMO_PRICING_VERIFIED_ON}:{OPENAI_DEMO_PRICING_SOURCE}"
+            ),
             Self::Operator => formatter.write_str("operator-file"),
         }
     }
@@ -158,39 +160,25 @@ impl Default for PricingRegistry {
 
 impl PricingRegistry {
     pub fn built_in() -> Self {
-        // These preserve the repository's legacy Phase 3 values. Their provider
-        // effective dates were not independently verified, so the metadata
-        // intentionally records `None` rather than inventing a date.
+        // Verified against the official OpenAI model page on 2026-08-29:
+        // https://developers.openai.com/api/docs/models/gpt-4o-mini
+        //
+        // Exact matches prevent specialized models with different modalities or
+        // pricing from inheriting the text-only Chat Completions rate.
         let entries = [
             (
                 Provider::Openai,
                 "gpt-4o-mini",
-                MatchType::Prefix,
+                MatchType::Exact,
                 0.15,
                 0.60,
             ),
-            (Provider::Openai, "gpt-4o", MatchType::Prefix, 5.00, 15.00),
-            (Provider::Openai, "gpt-4", MatchType::Prefix, 30.00, 60.00),
             (
                 Provider::Openai,
-                "gpt-3.5-turbo",
-                MatchType::Prefix,
-                0.50,
-                1.50,
-            ),
-            (
-                Provider::Gemini,
-                "gemini-1.5-flash",
-                MatchType::Prefix,
-                0.075,
-                0.30,
-            ),
-            (
-                Provider::Gemini,
-                "gemini-1.5-pro",
-                MatchType::Prefix,
-                1.25,
-                5.00,
+                OPENAI_DEMO_MODEL,
+                MatchType::Exact,
+                0.15,
+                0.60,
             ),
         ]
         .into_iter()
@@ -335,7 +323,8 @@ fn validate_prices(input: f64, output: f64) -> Result<(), PricingError> {
 #[cfg(test)]
 mod tests {
     use super::{
-        MatchType, PricingError, PricingRegistry, PricingSource, Provider, validate_prices,
+        MatchType, OPENAI_DEMO_MODEL, OPENAI_DEMO_PRICING_SOURCE, OPENAI_DEMO_PRICING_VERIFIED_ON,
+        PricingError, PricingRegistry, PricingSource, Provider, validate_prices,
     };
 
     fn operator_file(entries: &str) -> String {
@@ -343,18 +332,34 @@ mod tests {
     }
 
     #[test]
-    fn exact_known_model_resolves_and_unknown_fails_closed() {
+    fn official_demo_pricing_is_exact_and_unknown_models_fail_closed() {
+        assert_eq!(OPENAI_DEMO_PRICING_VERIFIED_ON, "2026-08-29");
+        assert_eq!(
+            OPENAI_DEMO_PRICING_SOURCE,
+            "https://developers.openai.com/api/docs/models/gpt-4o-mini"
+        );
         let registry = PricingRegistry::built_in();
         let known = registry
-            .resolve(Provider::Openai, "gpt-4o-mini-2024-07-18")
-            .expect("known built-in prefix should resolve");
-        assert_eq!(known.matched_model, "gpt-4o-mini");
+            .resolve(Provider::Openai, OPENAI_DEMO_MODEL)
+            .expect("the exact demo snapshot should resolve");
+        assert_eq!(known.matched_model, OPENAI_DEMO_MODEL);
         assert_eq!(known.source, PricingSource::BuiltIn);
-        assert_eq!(known.match_type, MatchType::Prefix);
-        assert!(matches!(
-            registry.resolve(Provider::Openai, "unconfigured-model"),
-            Err(PricingError::NotConfigured)
-        ));
+        assert_eq!(known.match_type, MatchType::Exact);
+        assert_eq!(known.pricing.input_cost_per_token, 0.15 / 1_000_000.0);
+        assert_eq!(known.pricing.output_cost_per_token, 0.60 / 1_000_000.0);
+
+        for unsupported in [
+            "gpt-4o-mini-audio-preview",
+            "gpt-4o-mini-search-preview",
+            "gpt-4o",
+            "gemini-2.5-flash",
+            "unconfigured-model",
+        ] {
+            assert!(matches!(
+                registry.resolve(Provider::Openai, unsupported),
+                Err(PricingError::NotConfigured)
+            ));
+        }
     }
 
     #[test]

@@ -36,7 +36,7 @@ curl --include --no-buffer \
   -H 'X-User-ID: diagnostic-user' \
   -H 'X-Mock-Upstream: true' \
   -H 'X-Mock-Events: 4' \
-  --data '{"model":"gpt-4o-mini","messages":[{"role":"user","content":"test"}],"stream":true}' \
+  --data '{"model":"gpt-4o-mini-2024-07-18","messages":[{"role":"user","content":"test"}],"stream":true}' \
   http://127.0.0.1:8080/v1/chat/completions
 ```
 
@@ -72,7 +72,7 @@ authorization values, user IDs, prompts, or logs into public issues.
 
 | Symptom | Meaning / check |
 |---|---|
-| `400` | Invalid JSON/content type, missing non-stream bound, unknown price, or unsupported non-stream Gemini request. |
+| `400` | Invalid JSON/content type, missing/invalid `X-User-ID`, missing non-stream bound, or unknown price. |
 | `401` | Missing/invalid proxy token, bearer header, or dashboard authentication. |
 | `413` | Request exceeded `KILOVOLT_MAX_REQUEST_BODY_BYTES`. |
 | `429` | Token gate or calculated project/user budget rejection. |

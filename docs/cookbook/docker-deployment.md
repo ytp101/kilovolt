@@ -16,8 +16,9 @@ finish setup. Kilovolt generates the application-facing gateway key. The
 provider key is held only in memory, masked in the UI, and substituted upstream
 after gateway authentication.
 
-The dashboard's **Send test request** action uses `gpt-4o-mini`, caps output at
-16 tokens, and runs through the normal proxy and accounting path. It can incur a
+The dashboard's **Send test request** action uses the pinned
+`gpt-4o-mini-2024-07-18` snapshot, caps output at 16 tokens, and runs through the
+normal proxy and accounting path. It can incur a
 small provider charge. The separate [provider-free demo](../quickstart.md) makes
 no paid request.
 
@@ -34,7 +35,7 @@ authenticated application backend
   -> X-User-ID: <identity derived from the authenticated session>
   -> Kilovolt project + user ledger
   -> Authorization: Bearer <temporarily stored OpenAI key>
-  -> OpenAI
+  -> OpenAI Chat Completions
 ```
 
 Never accept `X-User-ID` directly from an untrusted browser or mobile client.

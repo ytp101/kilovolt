@@ -23,7 +23,7 @@ To learn how to host this on low-cost servers, read [deploy llm proxy 5 dollar v
 Our gateway operates as a standalone service with zero runtime requirements:
 * Uses a local **bankruptcy shield** ledger to track spending limits.
 * Compiles with a built-in dark-mode dashboard at `/dashboard` to monitor analytics in real-time.
-* Provides native Google Gemini translation endpoints.
+* Supports the OpenAI Chat Completions API used by the official MVP.
 
 ---
 

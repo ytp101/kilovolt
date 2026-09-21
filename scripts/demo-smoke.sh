@@ -60,7 +60,7 @@ done
 [[ "${healthy}" == "true" ]] || fail "Kilovolt is unavailable at ${base_url}"
 pass "health endpoint"
 
-common_body='{"model":"gpt-4o-mini","messages":[{"role":"user","content":"hello"}],"stream":false,"max_completion_tokens":4}'
+common_body='{"model":"gpt-4o-mini-2024-07-18","messages":[{"role":"user","content":"hello"}],"stream":false,"max_completion_tokens":4}'
 
 status="$(curl --silent --show-error --output "${tmp_dir}/wrong-token" --write-out '%{http_code}' \
   -H 'Authorization: Bearer fake-provider-key' \
@@ -86,16 +86,16 @@ require_status "${status}" 400 "missing model pricing" "${tmp_dir}/missing-prici
 grep -Fq 'model_pricing_not_configured' "${tmp_dir}/missing-pricing" || fail "missing pricing did not fail closed"
 pass "missing model pricing fails closed"
 
-status="$(curl --silent --show-error --output "${tmp_dir}/anonymous" --write-out '%{http_code}' \
+status="$(curl --silent --show-error --output "${tmp_dir}/missing-user-id" --write-out '%{http_code}' \
   -H 'Authorization: Bearer fake-provider-key' \
   -H 'Content-Type: application/json' \
   -H "X-Kilovolt-Key: ${proxy_token}" \
   -H 'X-Mock-Upstream: true' \
   --data "${common_body}" \
   "${base_url}/v1/chat/completions")"
-require_status "${status}" 200 "missing trusted user identity fallback" "${tmp_dir}/anonymous"
-grep -Fq 'deterministic mock response' "${tmp_dir}/anonymous" || fail "anonymous fallback did not reach the mock"
-pass "missing X-User-ID uses the documented anonymous ledger"
+require_status "${status}" 400 "missing trusted user identity" "${tmp_dir}/missing-user-id"
+grep -Fq 'invalid_user_id' "${tmp_dir}/missing-user-id" || fail "missing identity did not return the expected error"
+pass "missing X-User-ID is rejected before body, upstream, and ledger work"
 
 status="$(curl --silent --show-error --output "${tmp_dir}/under-budget" --write-out '%{http_code}' \
   -H 'Authorization: Bearer fake-provider-key' \
@@ -115,7 +115,7 @@ status="$(curl --silent --show-error --output "${tmp_dir}/over-budget" --write-o
   -H 'X-User-ID: demo-over-budget' \
   -H "X-Kilovolt-Key: ${proxy_token}" \
   -H 'X-Mock-Upstream: true' \
-  --data '{"model":"gpt-4o-mini","messages":[{"role":"user","content":"hello"}],"stream":false,"max_completion_tokens":16}' \
+  --data '{"model":"gpt-4o-mini-2024-07-18","messages":[{"role":"user","content":"hello"}],"stream":false,"max_completion_tokens":16}' \
   "${base_url}/v1/chat/completions")"
 require_status "${status}" 429 "over-budget request" "${tmp_dir}/over-budget"
 grep -Fq 'User Budget Exceeded' "${tmp_dir}/over-budget" || fail "over-budget response did not identify the user limit"
@@ -127,7 +127,7 @@ status="$(curl --silent --show-error --output "${tmp_dir}/over-project-budget" -
   -H 'X-User-ID: demo-over-project-budget' \
   -H "X-Kilovolt-Key: ${proxy_token}" \
   -H 'X-Mock-Upstream: true' \
-  --data '{"model":"gpt-4o-mini","messages":[{"role":"user","content":"hello"}],"stream":false,"max_completion_tokens":1000}' \
+  --data '{"model":"gpt-4o-mini-2024-07-18","messages":[{"role":"user","content":"hello"}],"stream":false,"max_completion_tokens":1000}' \
   "${base_url}/v1/chat/completions")"
 require_status "${status}" 429 "project over-budget request" "${tmp_dir}/over-project-budget"
 grep -Fq 'Project Budget Exceeded' "${tmp_dir}/over-project-budget" || fail "project over-budget response did not identify the project limit"
@@ -140,7 +140,7 @@ status="$(curl --silent --show-error --no-buffer --output "${tmp_dir}/stream" --
   -H "X-Kilovolt-Key: ${proxy_token}" \
   -H 'X-Mock-Upstream: true' \
   -H 'X-Mock-Events: 20' \
-  --data '{"model":"gpt-4o-mini","messages":[{"role":"user","content":"stream a long answer"}],"stream":true}' \
+  --data '{"model":"gpt-4o-mini-2024-07-18","messages":[{"role":"user","content":"stream a long answer"}],"stream":true}' \
   "${base_url}/v1/chat/completions")"
 require_status "${status}" 200 "streaming request headers" "${tmp_dir}/stream"
 grep -Fq 'token-0' "${tmp_dir}/stream" || fail "streaming request returned no output frame"
@@ -154,7 +154,9 @@ status="$(curl --silent --show-error --output "${tmp_dir}/stats" --write-out '%{
   "${base_url}/api/stats")"
 require_status "${status}" 200 "stats endpoint" "${tmp_dir}/stats"
 grep -Fq '"multi_instance_safe":false' "${tmp_dir}/stats" || fail "stats did not expose process-local ledger metadata"
-grep -Fq '"anonymous":' "${tmp_dir}/stats" || fail "stats did not include the anonymous ledger"
+if grep -Fq '"anonymous":' "${tmp_dir}/stats"; then
+  fail "stats unexpectedly included an anonymous spending ledger"
+fi
 grep -Fq '"demo-under-budget":' "${tmp_dir}/stats" || fail "stats did not include the successful user ledger"
 if grep -Eq '"demo-under-budget":0(\.0+)?[,}]' "${tmp_dir}/stats"; then
   fail "stats showed zero spend for the successful request"

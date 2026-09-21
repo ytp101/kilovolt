@@ -1,4 +1,5 @@
 use crate::config::{AppState, EvaluationTestResult, RecentRequest, secrets_match};
+use crate::pricing::OPENAI_DEMO_MODEL;
 use crate::proxy::chat_completions_proxy;
 use axum::{
     Form, Json,
@@ -559,8 +560,9 @@ fn actionable_test_error(status: StatusCode) -> String {
                 .to_string()
         }
         StatusCode::BAD_REQUEST | StatusCode::UNPROCESSABLE_ENTITY => {
-            "OpenAI rejected the test request. Check that the saved key can use gpt-4o-mini, then try again."
-                .to_string()
+            format!(
+                "OpenAI rejected the test request. Check that the saved key can use {OPENAI_DEMO_MODEL}, then try again."
+            )
         }
         _ => format!(
             "The provider request failed with HTTP {}. Check provider access and try again.",
@@ -606,7 +608,7 @@ pub async fn post_evaluation_test(
     );
     headers.insert("x-user-id", HeaderValue::from_static(EVALUATION_USER_ID));
     let request = serde_json::json!({
-        "model": "gpt-4o-mini",
+        "model": OPENAI_DEMO_MODEL,
         "messages": [{"role": "user", "content": "Reply with: Kilovolt is working."}],
         "stream": false,
         "max_completion_tokens": 16

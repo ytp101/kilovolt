@@ -49,7 +49,7 @@ def chat_for_authenticated_user(authenticated_user_id: str, prompt: str):
             "X-User-ID": authenticated_user_id,
         },
         json={
-            "model": "gpt-4o-mini",
+            "model": "gpt-4o-mini-2024-07-18",
             "messages": [{"role": "user", "content": prompt}],
             "stream": False,
         },
@@ -90,6 +90,7 @@ ledger.
 
 ## Common failure modes
 
-Missing IDs share `anonymous`; restarting resets every `$5` ledger; multiple
-replicas each grant an independent `$5`; stale prices make the dollar estimate
-different from the provider invoice.
+Missing or malformed IDs are rejected before request-body, upstream, or ledger
+work. Restarting resets every `$5` ledger; multiple replicas each grant an
+independent `$5`; stale prices make the dollar estimate differ from the provider
+invoice.

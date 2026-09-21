@@ -52,7 +52,7 @@ Then use one of:
 - [Proxy authentication](proxy-authentication.md)
 - [Single-process deployment](single-process-deployment.md)
 - [Docker deployment](docker-deployment.md)
-- [Local OpenAI-compatible provider](local-openai-compatible-provider.md)
+- [Unverified custom upstream compatibility](local-openai-compatible-provider.md)
 - [Troubleshooting](troubleshooting.md)
 
 ## Verify it works
